@@ -1,0 +1,125 @@
+import os
+import os.path as osp
+import random
+import pandas as pd
+import numpy as np
+import sklearn.preprocessing as preprocessing
+import torch
+from torch_geometric.data import Data, InMemoryDataset, download_url, extract_zip
+
+from .smiles_util import mutag2smiles
+
+
+class Mutagenicity(InMemoryDataset):
+    url = "https://www.chrsmrrs.com/graphkerneldatasets/Mutagenicity.zip"
+
+    splits = ["training", "evaluation", "testing"]
+
+    def __init__(
+        self, root, mode="testing", transform=None, pre_transform=None, pre_filter=None
+    ):
+        assert mode in self.splits
+        self.mode = mode
+        super(Mutagenicity, self).__init__(root, transform, pre_transform, pre_filter)
+
+        idx = self.processed_file_names.index("{}.pt".format(mode))
+        self.data, self.slices = torch.load(self.processed_paths[idx])
+
+    @property
+    def raw_file_names(self):
+        return [
+            "Mutagenicity/" + i
+            for i in [
+                "Mutagenicity_A.txt",
+                "Mutagenicity_edge_labels.txt",
+                "Mutagenicity_graph_indicator.txt",
+                "Mutagenicity_graph_labels.txt",
+                "Mutagenicity_node_labels.txt",
+            ]
+        ]
+
+    @property
+    def processed_file_names(self):
+        return ["training.pt", "evaluation.pt", "testing.pt"]
+
+    def download(self):
+        if os.path.exists(osp.join(self.raw_dir, "Mutagenicity")):
+            print("Using existing data in folder Mutagenicity")
+            return
+
+        path = download_url(self.url, self.raw_dir)
+        extract_zip(path, self.raw_dir)
+        os.unlink(path)
+
+    def process(self):
+        edge_index = np.loadtxt(
+            osp.join(self.raw_dir, self.raw_file_names[0]), delimiter=","
+        ).T
+        edge_index = torch.from_numpy(edge_index - 1.0).to(
+            torch.long
+        )  # node idx from 0
+
+        edge_label = np.loadtxt(osp.join(self.raw_dir, self.raw_file_names[1]))
+        encoder = preprocessing.OneHotEncoder().fit(
+            np.unique(edge_label).reshape(-1, 1)
+        )
+        edge_attr = encoder.transform(edge_label.reshape(-1, 1)).toarray()
+        edge_attr = torch.Tensor(edge_attr)
+
+        node_label = np.loadtxt(osp.join(self.raw_dir, self.raw_file_names[-1]))
+        encoder = preprocessing.OneHotEncoder().fit(
+            np.unique(node_label).reshape(-1, 1)
+        )
+        x = encoder.transform(node_label.reshape(-1, 1)).toarray()
+        x = torch.Tensor(x)
+
+        z = np.loadtxt(osp.join(self.raw_dir, self.raw_file_names[2]), dtype=int)
+
+        y = np.loadtxt(osp.join(self.raw_dir, self.raw_file_names[3]))
+        y = torch.unsqueeze(torch.LongTensor(y), 1).long()
+        num_graphs = len(y)
+        total_edges = edge_index.size(1)
+        begin = 0
+
+        data_list = []
+        seen_smiles = set()
+        for i in range(num_graphs):
+            perm = np.where(z == i + 1)[0]
+            bound = max(perm)
+            end = begin
+            for end in range(begin, total_edges):
+                if int(edge_index[0, end]) > bound:
+                    break
+
+            data = Data(
+                x=x[perm],
+                y=y[i],
+                z=node_label[perm],
+                edge_index=edge_index[:, begin:end] - int(min(perm)),
+                edge_attr=edge_attr[begin:end],
+                name="mutag_%d" % i,
+                idx=i,
+            )
+            data.smiles = mutag2smiles(data)
+
+            # 去重
+            if data.smiles in seen_smiles:
+                begin = end
+                continue
+            seen_smiles.add(data.smiles)
+
+            begin = end
+            if data.idx not in [985, 3348, 3968, 3975, 4306, 2079, 3571, 4010, 1804, 1528, 2234, 2482, 277, 518, 93, 4188] and data.smiles:
+                data_list.append(data)
+
+        print(f"Total graphs: {len(data_list)}")
+        # assert len(data_list) == 4247
+
+        random.shuffle(data_list)
+        torch.save(self.collate(data_list[int(len(data_list)*0.4):]), self.processed_paths[0])
+        torch.save(self.collate(data_list[int(len(data_list)*0.2):int(len(data_list)*0.4)]), self.processed_paths[1])
+        torch.save(self.collate(data_list[:int(len(data_list)*0.2)]), self.processed_paths[2])
+
+        # torch.save(self.collate(data_list[1000:]), self.processed_paths[0])
+        # torch.save(self.collate(data_list[500:1000]), self.processed_paths[1])
+        # torch.save(self.collate(data_list[:500]), self.processed_paths[2])
