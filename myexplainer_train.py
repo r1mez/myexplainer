@@ -19,6 +19,7 @@ from utils import get_datasets, GraphPairData, custom_collate_fn, GraphTrainData
 from models.myexplainer import MyExplainer
 from utils.ps.mol_bpe import graph_bpe
 from utils.train_myexplainer import train_myexplainer, evaluate_myexplainer, train_myexplainer_with_subgraph
+from evaluation import compute_validity
 from gnns import *
 
 import random
@@ -200,6 +201,7 @@ def main_with_sub():
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
 
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=False)
+    val_eval_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
     # 检测实际最大节点数
     print("\n2. Detecting actual max_num_nodes from dataset...")
@@ -461,6 +463,24 @@ def main_with_sub():
         train_loader=train_loader_masked,
         optimizer=optimizer,
         epochs=args.epochs
+    )
+
+    print("\n9. Evaluating validity on validation set...")
+    print("=" * 80)
+
+    validity_metrics = compute_validity(
+        args=args,
+        model=trained_model,
+        gnn=gnn,
+        data_loader=val_eval_loader,
+    )
+
+    print(
+        "  Validity: {:.4f} (successful: {}/total: {})".format(
+            validity_metrics["validity"],
+            int(validity_metrics["successful"]),
+            int(validity_metrics["total"]),
+        )
     )
 
     print("\n" + "=" * 80)
