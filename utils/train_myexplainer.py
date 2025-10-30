@@ -5,15 +5,18 @@ from torch_geometric.utils import to_dense_adj, to_dense_batch
 from tqdm import tqdm
 import os
 from datetime import datetime
+
+from evaluation import evaluate
 from utils import compute_loss, concat_graphs
 import time
 
+import matplotlib.pyplot as plt
 
 
 
 
 
-def train_myexplainer(args, model, gnn, pair_loader, optimizer, epochs=200, log_dir='logs'):
+def train_myexplainer(args, model, gnn, pair_loader, eval_loader, optimizer, epochs=200, log_dir='logs'):
     """
     训练MyExplainer模型的主函数
 
@@ -119,6 +122,9 @@ def train_myexplainer(args, model, gnn, pair_loader, optimizer, epochs=200, log_
     best_epoch = 0
 
     for epoch in range(epochs):
+
+        model.train()
+        gnn.eval()
         epoch_losses = {
             'total': 0.0,
             'recon_x': 0.0,
@@ -329,6 +335,8 @@ def train_myexplainer(args, model, gnn, pair_loader, optimizer, epochs=200, log_
                 'kl': f'{kl_loss.item():.4f}'
             })
 
+
+
         # 计算epoch平均损失
         for key in epoch_losses:
             epoch_losses[key] /= num_batches
@@ -339,6 +347,7 @@ def train_myexplainer(args, model, gnn, pair_loader, optimizer, epochs=200, log_
         print(epoch_summary)
         print(f"  Total Loss: {epoch_losses['total']:.4f}")
         print(f"  Recon X Loss: {epoch_losses['recon_x']:.4f}")
+
         print(f"  Recon Adj Loss: {epoch_losses['recon_adj']:.4f}")
         print(f"  KL Loss: {epoch_losses['kl']:.4f}")
         print(f"  Pred Loss: {epoch_losses['pred']:.4f}")
@@ -369,7 +378,7 @@ def train_myexplainer(args, model, gnn, pair_loader, optimizer, epochs=200, log_
             f.write("\n")
 
         # 定期保存checkpoint
-        if (epoch + 1) % 20 == 0:
+        if (epoch + 1) % 10 == 0:
             checkpoint_path = f'param/myexplainer_epoch_{epoch+1}.pt'
             torch.save({
                 'epoch': epoch + 1,
@@ -382,6 +391,8 @@ def train_myexplainer(args, model, gnn, pair_loader, optimizer, epochs=200, log_
             # 记录到日志
             with open(log_file, 'a') as f:
                 f.write(f"  Checkpoint saved: {checkpoint_path}\n\n")
+
+
 
     # 训练结束，写入总结
     end_time = datetime.now()
@@ -596,7 +607,7 @@ def evaluate_myexplainer(args, model, gnn, val_loader):
 
 
 
-def train_myexplainer_with_subgraph(args, model, gnn, train_loader, optimizer, epochs=200, log_dir='logs'):
+def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader, optimizer, epochs=200, log_dir='logs'):
     """
     使用频繁子图掩码训练MyExplainer模型
 
@@ -619,11 +630,6 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, optimizer, e
         model: 训练好的模型
         losses: 损失历史字典
     """
-
-
-
-    model.train()
-    gnn.eval()
 
     # 创建日志目录
     os.makedirs(log_dir, exist_ok=True)
@@ -693,6 +699,8 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, optimizer, e
     original_graph_smiles = None  # 将存储原始SMILES用于比较
 
     for epoch in range(epochs):
+        model.train()
+        gnn.eval()
         epoch_losses = {
             'total': 0.0,
             'recon_x': 0.0,
@@ -771,7 +779,7 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, optimizer, e
             concated_graphs = concat_graphs(args, outputs, batch)
 
             # 5. 计算损失
-            batch_losses = compute_loss(args, outputs, batch, gnn, y_cf, concated_graphs, epoch_losses)
+            batch_losses = compute_loss(args, outputs, batch, gnn, y_cf, concated_graphs)
 
             # 提取总损失用于反向传播
             total_loss = batch_losses['total']
@@ -848,7 +856,7 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, optimizer, e
             f.write("\n")
 
         # 定期保存checkpoint
-        if (epoch + 1) % 20 == 0:
+        if (epoch + 1) % 10 == 0:
             checkpoint_path = f'param/myexplainer_subgraph_epoch_{epoch + 1}.pt'
             torch.save({
                 'epoch': epoch + 1,
@@ -860,6 +868,21 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, optimizer, e
 
             with open(log_file, 'a') as f:
                 f.write(f"  Checkpoint saved: {checkpoint_path}\n\n")
+
+        evaluation_metrics = evaluate(args, model, gnn, eval_loader)
+
+        print(
+            "  Validity: {:.4f} (successful: {}/total: {})".format(
+                evaluation_metrics["validity"],
+                int(evaluation_metrics["successful"]),
+                int(evaluation_metrics["total"]),
+            )
+        )
+        print(
+            "  Proximity: {:.4f}".format(
+                evaluation_metrics["proximity"]
+            )
+        )
 
     # 训练结束
     end_time = datetime.now()
@@ -890,5 +913,26 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, optimizer, e
     print(f"Training log saved to: {log_file}")
     if viz_enabled:
         print(f"Visualizations saved to: {viz_dir}")
+
+    # 绘制损失曲线
+    epochs_range = range(1, epochs + 1)
+    plt.figure(figsize=(12, 8))
+    plt.plot(epochs_range, losses['total'], label='Total Loss', linewidth=2)
+    plt.plot(epochs_range, losses['recon_x'], label='Recon X Loss')
+    plt.plot(epochs_range, losses['recon_adj'], label='Recon Adj Loss')
+    # plt.plot(epochs_range, losses['diversity'], label='Diversity Loss')
+    # plt.plot(epochs_range, losses['distribution'], label='Distribution Loss')
+    plt.plot(epochs_range, losses['kl'], label='KL Loss')
+    plt.plot(epochs_range, losses['pred'], label='Pred Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training Loss Curves')
+    plt.legend()
+    plt.grid(True)
+    loss_plot_path = os.path.join(log_dir, f"loss_curves_{timestamp}.png")
+    plt.savefig(loss_plot_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    plt.close()
+    print(f"Loss curves saved to: {loss_plot_path}")
 
     return model, losses

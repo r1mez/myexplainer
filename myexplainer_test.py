@@ -1,4 +1,6 @@
 import argparse
+import hashlib
+import pickle
 import sys
 import os
 
@@ -27,7 +29,7 @@ from rdkit import Chem
 from utils import concat_graphs
 from torch_geometric.data import Data, Batch
 
-import datetime
+from datetime import datetime
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test MyExplainer on test dataset")
@@ -852,10 +854,44 @@ def main1():
 
     # 创建带掩码的训练数据集 (WARNING: This will overwrite args.max_subgraph_nodes!)
     print("\n6. Creating training dataset with subgraph masks...")
-    test_dataset_with_masks = GraphTrainData(args, test_loader, gnn, vocab)
-    print(f"  Total graphs: {len(test_dataset_with_masks)}")
-    print(f"  WARNING: GraphTrainData changed max_subgraph_nodes from {model_max_subgraph_nodes} to {args.max_subgraph_nodes}")
-    print(f"  This is OK because model was already initialized with {model_max_subgraph_nodes}")
+    os.makedirs('cache', exist_ok=True)
+    vocab_str = str(sorted(vocab[0])) + str(sorted(vocab[1]))
+    vocab_hash = hashlib.md5(vocab_str.encode()).hexdigest()[:8]
+    cache_test = f'cache/graph_test_data_{args.dataset.lower()}_{vocab_hash}.pkl'
+    if os.path.exists(cache_test):
+        print(f"  Found cached dataset at {cache_test}")
+        print("  Loading from cache...")
+        with open(cache_test, 'rb') as f:
+            cache_data = pickle.load(f)
+
+        # 恢复数据
+        test_dataset_with_masks = cache_data['dataset']
+        if 'max_subgraph_nodes' in cache_data:
+            args.max_subgraph_nodes = cache_data['max_subgraph_nodes']
+            print(f"  Restored max_subgraph_nodes: {args.max_subgraph_nodes}")
+
+        print(f"  Loaded {len(test_dataset_with_masks)} graphs from cache")
+    else:
+        print(f"  No cache found, creating dataset from scratch...")
+        print(f"  This may take a while...")
+
+        # 创建数据集（耗时操作）
+        test_dataset_with_masks = GraphTrainData(args, test_loader, gnn, vocab)
+
+        # 保存到缓存
+        print(f"  Saving dataset to cache: {cache_test}")
+        cache_data = {
+            'dataset': test_dataset_with_masks,
+            'max_subgraph_nodes': args.max_subgraph_nodes,  # 保存修改后的值
+            'vocab_hash': vocab_hash,
+            'dataset_name': args.dataset.lower(),
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        with open(cache_test, 'wb') as f:
+            pickle.dump(cache_data, f)
+        print(f"  Cache saved successfully")
+        print(f"  Total graphs: {len(test_dataset_with_masks)}")
+
 
     # 创建DataLoader (使用标准PyTorch DataLoader而不是PyG的DataLoader)
     print("\n7. Creating masked data loader...")
@@ -879,7 +915,7 @@ def main1():
     print("\nGenerating counterfactual explanations...")
     print("(自动为每个测试样本生成反事实解释，将预测标签翻转)")
     results = generate_counterfactuals(args, model, gnn, test_loader_masked)
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     visualize_counterfactuals(results, test_dataset_with_masks, save_dir= os.path.join(args.output_dir, timestamp))
 
 if __name__ == "__main__":

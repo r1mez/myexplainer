@@ -220,7 +220,7 @@ def Etrain(args, train_loader, model, exp_model, optimizer):
 #         'pred': pred_loss * 5.0
 #     }
 
-def compute_loss(args, outputs, batch, gnn, y_cf, concated_graphs, epoch_losses):
+def compute_loss(args, outputs, batch, gnn, y_cf, concated_graphs):
     loss_proportion = args.loss_proportion
 
     device = args.device

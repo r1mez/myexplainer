@@ -275,7 +275,18 @@ def concat_graphs(args, outputs, batch):
         # Reconstruct node features
         recon_x = orig.x.clone()
         if real_n > 0:
-            recon_x[mapping] = x_recon[i, real_indices]
+            # 将连续值离散化为one-hot编码
+            # x_recon[i, real_indices]: (real_n, x_dim) 连续值
+            x_recon_sub = x_recon[i, real_indices]  # (real_n, x_dim)
+            # 取argmax获取类别索引
+            atom_indices = torch.argmax(x_recon_sub, dim=-1)  # (real_n,)
+            # 转换为one-hot
+            x_recon_onehot = torch.zeros_like(x_recon_sub)  # (real_n, x_dim)
+            x_recon_onehot.scatter_(1, atom_indices.unsqueeze(-1), 1.0)
+            # 赋值到原图
+            recon_x[mapping] = x_recon_onehot
+        # if real_n > 0:
+        #     recon_x[mapping] = x_recon[i, real_indices]
 
         # Reconstruct edge_index
         sub_nodes_mask = torch.zeros(orig.num_nodes, dtype=torch.bool, device=device)

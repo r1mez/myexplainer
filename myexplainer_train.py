@@ -21,6 +21,8 @@ from utils.ps.mol_bpe import graph_bpe
 from utils.train_myexplainer import train_myexplainer, evaluate_myexplainer, train_myexplainer_with_subgraph
 from gnns import *
 
+from evaluation import evaluate
+
 import random
 import numpy as np
 def set_seed(seed):
@@ -45,12 +47,12 @@ def parse_args():
     parser.add_argument('--threshold', type=float, default=0.9, help='Prediction confidence threshold')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
 
-    parser.add_argument("--loss_recon_x", type=float, default=2.0, help="Reconstruction loss weight for node features")
-    parser.add_argument("--loss_recon_adj", type=float, default=2.0, help="Reconstruction loss weight for adjacency matrix")
+    parser.add_argument("--loss_recon_x", type=float, default=1.0, help="Reconstruction loss weight for node features")
+    parser.add_argument("--loss_recon_adj", type=float, default=1.0, help="Reconstruction loss weight for adjacency matrix")
     parser.add_argument("--loss_diversity", type=float, default=0.0, help="Diversity loss weight")
     parser.add_argument("--loss_distribution", type=float, default=0.0, help="Distribution matching loss weight")
-    parser.add_argument("--loss_kl", type=float, default=0.01, help="KL divergence loss weight")
-    parser.add_argument("--loss_pred", type=float, default=1.0, help="Prediction loss weight")
+    parser.add_argument("--loss_kl", type=float, default=0.1, help="KL divergence loss weight")
+    parser.add_argument("--loss_pred", type=float, default=5.0, help="Prediction loss weight")
 
     # 模型参数
     parser.add_argument('--x_dim', type=int, default=14, help='Node feature dimension (14 for mutag)')
@@ -69,7 +71,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
+def main1():
     args = parse_args()
 
     # 设置设备
@@ -149,6 +151,7 @@ def main():
         model=model,
         gnn=gnn,
         pair_loader=train_pair_loader,
+        eval_loader=val_eval_loader,
         optimizer=optimizer,
         epochs=args.epochs
     )
@@ -179,7 +182,7 @@ def main():
     print("Training completed successfully!")
     print("=" * 80)
 
-def main_with_sub():
+def main():
     args = parse_args()
     args.loss_proportion = {
         'recon_x': args.loss_recon_x,
@@ -217,6 +220,7 @@ def main_with_sub():
     gnn = torch.load(f'param/gnns/{args.dataset.lower()}_gcn.pt', map_location=args.device)
 
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
     smiles_0=[]
     smiles_1=[]
@@ -379,19 +383,20 @@ def main_with_sub():
     print("  GNN loaded successfully")
 
     # 创建带掩码的训练数据集 (with caching)
-    print("\n5. Creating training dataset with subgraph masks...")
+    print("\n5. Creating dataset with subgraph masks...")
 
     # 生成缓存文件名（基于数据集名称和vocab内容的哈希）
     os.makedirs('cache', exist_ok=True)
     vocab_str = str(sorted(vocab[0])) + str(sorted(vocab[1]))
     vocab_hash = hashlib.md5(vocab_str.encode()).hexdigest()[:8]
-    cache_file = f'cache/graph_train_data_{args.dataset.lower()}_{vocab_hash}.pkl'
+    cache_train = f'cache/graph_train_data_{args.dataset.lower()}_{vocab_hash}.pkl'
+
 
     # 检查缓存是否存在
-    if os.path.exists(cache_file):
-        print(f"  Found cached dataset at {cache_file}")
+    if os.path.exists(cache_train):
+        print(f"  Found cached dataset at {cache_train}")
         print("  Loading from cache...")
-        with open(cache_file, 'rb') as f:
+        with open(cache_train, 'rb') as f:
             cache_data = pickle.load(f)
 
         # 恢复数据
@@ -410,7 +415,7 @@ def main_with_sub():
         train_dataset_with_masks = GraphTrainData(args, train_loader, gnn, vocab)
 
         # 保存到缓存
-        print(f"  Saving dataset to cache: {cache_file}")
+        print(f"  Saving dataset to cache: {cache_train}")
         cache_data = {
             'dataset': train_dataset_with_masks,
             'max_subgraph_nodes': args.max_subgraph_nodes,  # 保存修改后的值
@@ -418,10 +423,44 @@ def main_with_sub():
             'dataset_name': args.dataset.lower(),
             'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
-        with open(cache_file, 'wb') as f:
+        with open(cache_train, 'wb') as f:
             pickle.dump(cache_data, f)
         print(f"  Cache saved successfully")
         print(f"  Total graphs: {len(train_dataset_with_masks)}")
+
+    # 为验证集创建带掩码的数据集 (with caching)
+    cache_val = f'cache/graph_val_data_{args.dataset.lower()}_{vocab_hash}.pkl'
+
+    # 检查缓存是否存在
+    if os.path.exists(cache_val):
+        print(f"  Found cached validation dataset at {cache_val}")
+        print("  Loading from cache...")
+        with open(cache_val, 'rb') as f:
+            cache_data_val = pickle.load(f)
+
+        # 恢复数据
+        val_dataset_with_masks = cache_data_val['dataset']
+        print(f"  Loaded {len(val_dataset_with_masks)} graphs from cache")
+    else:
+        print(f"  No cache found, creating validation dataset from scratch...")
+        print(f"  This may take a while...")
+
+        # 创建验证集数据集（耗时操作）
+        val_dataset_with_masks = GraphTrainData(args, val_loader, gnn, vocab)
+
+        # 保存到缓存
+        print(f"  Saving validation dataset to cache: {cache_val}")
+        cache_data_val = {
+            'dataset': val_dataset_with_masks,
+            'max_subgraph_nodes': args.max_subgraph_nodes,
+            'vocab_hash': vocab_hash,
+            'dataset_name': args.dataset.lower(),
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        with open(cache_val, 'wb') as f:
+            pickle.dump(cache_data_val, f)
+        print(f"  Cache saved successfully")
+        print(f"  Total graphs: {len(val_dataset_with_masks)}")
 
     # 创建DataLoader (使用标准PyTorch DataLoader而不是PyG的DataLoader)
     print("\n6. Creating masked data loader...")
@@ -429,6 +468,12 @@ def main_with_sub():
         train_dataset_with_masks,
         batch_size=args.batch_size,
         shuffle=True,
+        collate_fn=train_collate_fn
+    )
+    val_loader_masked = TorchDataLoader(
+        val_dataset_with_masks,
+        batch_size=args.batch_size,
+        shuffle=False,
         collate_fn=train_collate_fn
     )
     print(f"  Batch size: {args.batch_size}")
@@ -459,6 +504,7 @@ def main_with_sub():
         model=model,
         gnn=gnn,
         train_loader=train_loader_masked,
+        eval_loader=val_loader_masked,
         optimizer=optimizer,
         epochs=args.epochs
     )
@@ -467,7 +513,34 @@ def main_with_sub():
     print("Training completed successfully!")
     print("=" * 80)
 
+    # 8. 评估模型（使用原始验证集，不使用配对数据）
+    print("\n9. Evaluating on validation set...")
+    print("=" * 80)
+
+    evaluation_metrics = evaluate(
+        args=args,
+        model=trained_model,
+        gnn=gnn,
+        data_loader=val_loader_masked,
+    )
+
+    print(
+        "  Validity: {:.4f} (successful: {}/total: {})".format(
+            evaluation_metrics["validity"],
+            int(evaluation_metrics["successful"]),
+            int(evaluation_metrics["total"]),
+        )
+    )
+    print(
+        "  Proximity: {:.4f}".format(
+            evaluation_metrics["proximity"]
+        )
+    )
+
+    print("\n" + "=" * 80)
+    print("Training completed successfully!")
+    print("=" * 80)
+
 
 if __name__ == '__main__':
-    main_with_sub()
-    # main()
+    main()
