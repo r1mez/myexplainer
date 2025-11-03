@@ -47,12 +47,12 @@ def parse_args():
     parser.add_argument('--threshold', type=float, default=0, help='Prediction confidence threshold')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
 
-    parser.add_argument("--loss_recon_x", type=float, default=0.0, help="Reconstruction loss weight for node features")
+    parser.add_argument("--loss_recon_x", type=float, default=1.0, help="Reconstruction loss weight for node features")
     parser.add_argument("--loss_recon_adj", type=float, default=5.0, help="Reconstruction loss weight for adjacency matrix")
     parser.add_argument("--loss_diversity", type=float, default=0.0, help="Diversity loss weight")
     parser.add_argument("--loss_distribution", type=float, default=0.0, help="Distribution matching loss weight")
     parser.add_argument("--loss_kl", type=float, default=1.0, help="KL divergence loss weight")
-    parser.add_argument("--loss_pred", type=float, default=3.0, help="Prediction loss weight")
+    parser.add_argument("--loss_pred", type=float, default=5.0, help="Prediction loss weight")
 
     # 模型参数
     parser.add_argument('--x_dim', type=int, default=14, help='Node feature dimension (14 for mutag)')

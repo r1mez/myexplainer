@@ -359,17 +359,9 @@ def extract_explanatory_subgraph(original, counterfactual):
         all_nodes.add(explain_edge_index[1, i].item())
 
     if not all_nodes:
-        # Empty explanation graph - all nodes belong to non-explanation graph
-        empty_explain_graph = Data(
-            x=torch.empty((0, original.x.size(1)), dtype=original.x.dtype, device=original.x.device),
-            edge_index=torch.empty((2, 0), dtype=torch.long, device=original.edge_index.device)
-        )
-        # Non-explanation graph is the entire original graph
-        non_explain_graph = Data(x=original.x, edge_index=original.edge_index)
-        return empty_explain_graph, non_explain_graph
-
-        # # Retain the first node (index 0) as a fallback to avoid empty graph
-        # all_nodes.add(0)
+        # Empty graph if no nodes
+        return Data(x=torch.empty((0, original.x.size(1)), dtype=original.x.dtype, device=original.x.device),
+                    edge_index=torch.empty((2, 0), dtype=torch.long, device=original.edge_index.device))
 
     node_list = sorted(all_nodes)
     num_explain_nodes = len(node_list)
@@ -389,15 +381,12 @@ def extract_explanatory_subgraph(original, counterfactual):
         explain_edge_index = new_edge_index
     # else: already empty
 
-    # Create explanation graph
+    # Create new Data object
     # Only include x and edge_index to ensure consistent attributes across all graphs in a batch
     # This prevents KeyError when creating batches with Batch.from_data_list()
     explain_graph = Data(x=explain_x, edge_index=explain_edge_index)
 
-    # Build non-explanation subgraph by calling exclude_explanatory_subgraph
-    non_explain_graph = exclude_explanatory_subgraph(original, counterfactual)
-
-    return explain_graph, non_explain_graph
+    return explain_graph
 
 
 def exclude_explanatory_subgraph(original: Data, counterfactual: Data) -> Data:

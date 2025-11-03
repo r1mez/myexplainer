@@ -12,7 +12,6 @@ from torch_geometric.utils import to_dense_adj
 
 from typing import Optional
 
-# 无节点特征修改
 class MyExplainer(nn.Module):
     def __init__(self, args,gnn):
         super(MyExplainer, self).__init__()
@@ -36,11 +35,11 @@ class MyExplainer(nn.Module):
         self.graph_model = DenseGCNConv(self.x_dim, self.h_dim)
 
         # encoder
-        self.encoder_mean = nn.Sequential(nn.Linear(self.h_dim + 1 , self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU())
-        self.encoder_var = nn.Sequential(nn.Linear(self.h_dim + 1, self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU(), nn.Sigmoid())
+        # self.encoder_mean = nn.Sequential(nn.Linear(self.h_dim + 1 , self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU())
+        # self.encoder_var = nn.Sequential(nn.Linear(self.h_dim + 1, self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU(), nn.Sigmoid())
 
-        # self.encoder_mean = nn.Sequential(nn.Linear(self.h_dim , self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU())
-        # self.encoder_var = nn.Sequential(nn.Linear(self.h_dim, self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU(), nn.Sigmoid())
+        self.encoder_mean = nn.Sequential(nn.Linear(self.h_dim , self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU())
+        self.encoder_var = nn.Sequential(nn.Linear(self.h_dim, self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU(), nn.Sigmoid())
 
         # decoder
         # self.decoder_x = nn.Sequential(nn.Linear(self.z_dim + 1, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
@@ -49,6 +48,9 @@ class MyExplainer(nn.Module):
         # self.decoder_a = nn.Sequential(nn.Linear(self.z_dim + 1, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
         #                                nn.Linear(self.h_dim, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
         #                                nn.Linear(self.h_dim, self.max_num_nodes*self.max_num_nodes), nn.Sigmoid())
+        self.decoder_x = nn.Sequential(nn.Linear(self.z_dim + 1, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
+                                       nn.Linear(self.h_dim, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
+                                       nn.Linear(self.h_dim, self.max_num_nodes*self.x_dim))
         self.decoder_a = nn.Sequential(nn.Linear(self.z_dim + 1, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
                                        nn.Linear(self.h_dim, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
                                        nn.Linear(self.h_dim, self.max_num_nodes*self.max_num_nodes), nn.Sigmoid())
@@ -57,23 +59,23 @@ class MyExplainer(nn.Module):
         # self.encoder_mean_tgt = nn.Sequential(nn.Linear(self.h_dim + 1, self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU())
         # self.encoder_var_tgt = nn.Sequential(nn.Linear(self.h_dim + 1, self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU(),nn.Sigmoid())
 
-    def encoder(self, features, adj,y_cf):
-        graph_rep = self.graph_model(features,adj)  # n x num_node x h_dim
-        graph_rep = self.graph_pooling(graph_rep, self.graph_pool_type)  # n x h_dim
-
-        z_mu = self.encoder_mean(torch.cat([graph_rep, y_cf], dim=-1))
-        z_logvar = self.encoder_var(torch.cat([graph_rep, y_cf], dim=-1))
-
-        return z_mu, z_logvar
-
-    # def encoder(self, features, adj):
+    # def encoder(self, features, adj,y_cf):
     #     graph_rep = self.graph_model(features,adj)  # n x num_node x h_dim
     #     graph_rep = self.graph_pooling(graph_rep, self.graph_pool_type)  # n x h_dim
     #
-    #     z_mu = self.encoder_mean(torch.cat([graph_rep], dim=-1))
-    #     z_logvar = self.encoder_var(torch.cat([graph_rep], dim=-1))
+    #     z_mu = self.encoder_mean(torch.cat([graph_rep, y_cf], dim=-1))
+    #     z_logvar = self.encoder_var(torch.cat([graph_rep, y_cf], dim=-1))
     #
     #     return z_mu, z_logvar
+
+    def encoder(self, features, adj):
+        graph_rep = self.graph_model(features,adj)  # n x num_node x h_dim
+        graph_rep = self.graph_pooling(graph_rep, self.graph_pool_type)  # n x h_dim
+
+        z_mu = self.encoder_mean(torch.cat([graph_rep], dim=-1))
+        z_logvar = self.encoder_var(torch.cat([graph_rep], dim=-1))
+
+        return z_mu, z_logvar
 
     # def encoder_tgt(self, features, adj,y_cf):
     #     graph_rep = self.graph_model(features, adj)  # n x num_node x h_dim
@@ -90,9 +92,9 @@ class MyExplainer(nn.Module):
     #     adj_recon = self.decoder_a(dec_input)
     #     return x_recon, adj_recon
 
-    def decoder(self, z, y_cf, features):
+    def decoder(self, z, y_cf):
         dec_input = torch.cat([z,y_cf], dim=-1)
-        x_recon = features
+        x_recon = self.decoder_x(dec_input)
         adj_recon = self.decoder_a(dec_input)
         return x_recon, adj_recon
 
@@ -136,13 +138,13 @@ class MyExplainer(nn.Module):
         """
         # 1. 编码输入图（使用反事实标签y_cf）
         # z_mu, z_logvar = self.encoder(features, adj, y_cf)
-        z_mu, z_logvar = self.encoder(features, adj, y_cf)
+        z_mu, z_logvar = self.encoder(features, adj)
 
         # 2. 重参数化采样
         z = self.reparameterize(z_mu, z_logvar)
 
         # 3. 解码生成反事实图
-        x_recon, adj_recon = self.decoder(z, y_cf, features)
+        x_recon, adj_recon = self.decoder(z, y_cf)
         # x_recon, adj_recon = self.decoder(z)
 
         # 返回基础VAE输出
@@ -160,160 +162,6 @@ class MyExplainer(nn.Module):
             output['z_logvar_tgt'] = z_logvar_tgt
 
         return output
-
-
-# # 有节点特征修改
-# class MyExplainer(nn.Module):
-#     def __init__(self, args,gnn):
-#         super(MyExplainer, self).__init__()
-#         self.x_dim = args.x_dim
-#         self.h_dim = args.h_dim
-#         self.z_dim = args.z_dim
-#         self.u_dim = args.u_dim
-#         self.edge_attr_dim = args.edge_attr_dim
-#         self.max_num_nodes = args.max_subgraph_nodes
-#         self.dropout = args.dropout if hasattr(args, 'dropout') else 0.1
-#         self.graph_pool_type = 'mean'
-#         self.device = args.device
-#         self.model = gnn
-#         self.device = args.device
-#
-#
-#         # if self.edge_attr_dim != 0:
-#         #     self.graph_model = DenseGATConv(self.x_dim, self.edge_attr_dim,self.h_dim)
-#         # else:
-#         #     self.graph_model = DenseGCNConv(self.x_dim, self.h_dim)
-#         self.graph_model = DenseGCNConv(self.x_dim, self.h_dim)
-#
-#         # encoder
-#         # self.encoder_mean = nn.Sequential(nn.Linear(self.h_dim + 1 , self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU())
-#         # self.encoder_var = nn.Sequential(nn.Linear(self.h_dim + 1, self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU(), nn.Sigmoid())
-#
-#         self.encoder_mean = nn.Sequential(nn.Linear(self.h_dim , self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU())
-#         self.encoder_var = nn.Sequential(nn.Linear(self.h_dim, self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU(), nn.Sigmoid())
-#
-#         # decoder
-#         # self.decoder_x = nn.Sequential(nn.Linear(self.z_dim + 1, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
-#         #                                nn.Linear(self.h_dim, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
-#         #                                nn.Linear(self.h_dim, self.max_num_nodes*self.x_dim))
-#         # self.decoder_a = nn.Sequential(nn.Linear(self.z_dim + 1, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
-#         #                                nn.Linear(self.h_dim, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
-#         #                                nn.Linear(self.h_dim, self.max_num_nodes*self.max_num_nodes), nn.Sigmoid())
-#         self.decoder_x = nn.Sequential(nn.Linear(self.z_dim + 1, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
-#                                        nn.Linear(self.h_dim, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
-#                                        nn.Linear(self.h_dim, self.max_num_nodes*self.x_dim))
-#         self.decoder_a = nn.Sequential(nn.Linear(self.z_dim + 1, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
-#                                        nn.Linear(self.h_dim, self.h_dim), nn.BatchNorm1d(self.h_dim), nn.Dropout(self.dropout), nn.ReLU(),
-#                                        nn.Linear(self.h_dim, self.max_num_nodes*self.max_num_nodes), nn.Sigmoid())
-#
-#         # encoder for target graphs
-#         # self.encoder_mean_tgt = nn.Sequential(nn.Linear(self.h_dim + 1, self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU())
-#         # self.encoder_var_tgt = nn.Sequential(nn.Linear(self.h_dim + 1, self.z_dim), nn.BatchNorm1d(self.z_dim), nn.ReLU(),nn.Sigmoid())
-#
-#     # def encoder(self, features, adj,y_cf):
-#     #     graph_rep = self.graph_model(features,adj)  # n x num_node x h_dim
-#     #     graph_rep = self.graph_pooling(graph_rep, self.graph_pool_type)  # n x h_dim
-#     #
-#     #     z_mu = self.encoder_mean(torch.cat([graph_rep, y_cf], dim=-1))
-#     #     z_logvar = self.encoder_var(torch.cat([graph_rep, y_cf], dim=-1))
-#     #
-#     #     return z_mu, z_logvar
-#
-#     def encoder(self, features, adj):
-#         graph_rep = self.graph_model(features,adj)  # n x num_node x h_dim
-#         graph_rep = self.graph_pooling(graph_rep, self.graph_pool_type)  # n x h_dim
-#
-#         z_mu = self.encoder_mean(torch.cat([graph_rep], dim=-1))
-#         z_logvar = self.encoder_var(torch.cat([graph_rep], dim=-1))
-#
-#         return z_mu, z_logvar
-#
-#     # def encoder_tgt(self, features, adj,y_cf):
-#     #     graph_rep = self.graph_model(features, adj)  # n x num_node x h_dim
-#     #     graph_rep = self.graph_pooling(graph_rep, self.graph_pool_type)  # n x h_dim
-#     #
-#     #     z_mu = self.encoder_mean_tgt(torch.cat([graph_rep, y_cf], dim=-1))
-#     #     z_logvar = self.encoder_var_tgt(torch.cat([graph_rep, y_cf], dim=-1))
-#     #
-#     #     return z_mu, z_logvar
-#
-#     # def decoder(self, z, y_cf):
-#     #     dec_input = torch.cat([z, y_cf], dim=-1)
-#     #     x_recon = self.decoder_x(dec_input)
-#     #     adj_recon = self.decoder_a(dec_input)
-#     #     return x_recon, adj_recon
-#
-#     def decoder(self, z, y_cf):
-#         dec_input = torch.cat([z,y_cf], dim=-1)
-#         x_recon = self.decoder_x(dec_input)
-#         adj_recon = self.decoder_a(dec_input)
-#         return x_recon, adj_recon
-#
-#     def graph_pooling(self, x, type='mean'):
-#         if type == 'max':
-#             out, _ = torch.max(x, dim=1, keepdim=False)
-#         elif type == 'sum':
-#             out = torch.sum(x, dim=1, keepdim=False)
-#         elif type == 'mean':
-#             out = torch.mean(x, dim=1, keepdim=False)  # 修复：使用mean而不是sum
-#         return out
-#
-#     def reparameterize(self, mu, logvar):
-#         '''
-#         compute z = mu + std * epsilon
-#         '''
-#         if self.training:
-#             # compute the standard deviation from logvar
-#             std = torch.exp(0.5 * logvar)
-#             # sample epsilon from a normal distribution with mean 0 and
-#             # variance 1
-#             eps = torch.randn_like(std)
-#             return eps.mul(std).add_(mu)
-#         else:
-#             return mu
-#
-#     def forward(self, features, adj, y_cf, features_tgt=None, adj_tgt=None, y=None):
-#         """
-#         标准VAE前向传播
-#
-#         Args:
-#             features: 输入图的节点特征 (batch, max_num_nodes, x_dim)
-#             adj: 输入图的邻接矩阵 (batch, max_num_nodes, max_num_nodes)
-#             y_cf: 目标反事实标签 (batch, 1)
-#             features_tgt: (可选) 目标图的节点特征，用于配对训练
-#             adj_tgt: (可选) 目标图的邻接矩阵
-#             y: (可选) 原始标签
-#
-#         Returns:
-#             dict: 包含重构结果和潜在变量参数
-#         """
-#         # 1. 编码输入图（使用反事实标签y_cf）
-#         # z_mu, z_logvar = self.encoder(features, adj, y_cf)
-#         z_mu, z_logvar = self.encoder(features, adj)
-#
-#         # 2. 重参数化采样
-#         z = self.reparameterize(z_mu, z_logvar)
-#
-#         # 3. 解码生成反事实图
-#         x_recon, adj_recon = self.decoder(z, y_cf)
-#         x_recon = features
-#         # x_recon, adj_recon = self.decoder(z)
-#
-#         # 返回基础VAE输出
-#         output = {
-#             'x_recon': x_recon,
-#             'adj_recon': adj_recon,
-#             'z_mu': z_mu,
-#             'z_logvar': z_logvar,
-#         }
-#
-#         # 4. (可选) 如果提供了目标图，编码用于对比学习
-#         if features_tgt is not None and adj_tgt is not None and y is not None:
-#             z_mu_tgt, z_logvar_tgt = self.encoder(features_tgt, adj_tgt, y)
-#             output['z_mu_tgt'] = z_mu_tgt
-#             output['z_logvar_tgt'] = z_logvar_tgt
-#
-#         return output
 
 
 

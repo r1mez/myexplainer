@@ -179,44 +179,31 @@ def compute_proximity(args, cf_graphs, ori_graphs):
 
 def compute_fidelity(args, ori_graphs, cf_graphs, ori_pred, gnn):
     ori_graphs, cf_graphs = ori_graphs.to_data_list(), cf_graphs.to_data_list()
-
-    # extract_explanatory_subgraph now returns both explain and non-explain graphs
-    results = [extract_explanatory_subgraph(ori, cf) for ori, cf in zip(ori_graphs, cf_graphs)]
-    exp_graphs = [r[0] for r in results]  # Explanation subgraphs
-    # Use exclude_explanatory_subgraph to get non-explanation subgraphs
+    exp_graphs = [extract_explanatory_subgraph(ori, cf) for ori, cf in zip(ori_graphs, cf_graphs)]
     exp_excluded_graphs = [exclude_explanatory_subgraph(ori, cf) for ori, cf in zip(ori_graphs, cf_graphs)]
+
+    exp_graphs_batch = Batch.from_data_list(exp_graphs).to(args.device)
+    exp_excluded_batch = Batch.from_data_list(exp_excluded_graphs).to(args.device)
 
     fidel_plus_count = 0
     fidel_minus_count = 0
 
-    # Process each graph individually to handle empty graphs properly
-    for i in range(len(ori_graphs)):
-        exp_graph = exp_graphs[i]
-        exp_excluded_graph = exp_excluded_graphs[i]
+    exp_pred_logits = gnn.get_pred(
+        exp_graphs_batch.x, exp_graphs_batch.edge_index, exp_graphs_batch.batch
+    )[0]
+    exp_pred = exp_pred_logits.argmax(dim=1)
 
-        # Fidelity+: explanation subgraph should preserve original prediction
-        if exp_graph.num_nodes > 0:
-            exp_batch = Batch.from_data_list([exp_graph]).to(args.device)
-            exp_pred_logits = gnn.get_pred(
-                exp_batch.x, exp_batch.edge_index, exp_batch.batch
-            )[0]
-            exp_pred = exp_pred_logits.argmax(dim=1).item()
+    exp_excluded_logits = gnn.get_pred(
+        exp_excluded_batch.x, exp_excluded_batch.edge_index, exp_excluded_batch.batch
+    )[0]
+    exp_excluded_pred = exp_excluded_logits.argmax(dim=1)
 
-            if exp_pred == ori_pred[i]:
-                fidel_plus_count += 1
-        # else: empty explanation graph, skip (cannot compute fidelity)
 
-        # Fidelity-: non-explanation subgraph should flip to counterfactual prediction
-        if exp_excluded_graph.num_nodes > 0:
-            exp_excluded_batch = Batch.from_data_list([exp_excluded_graph]).to(args.device)
-            exp_excluded_logits = gnn.get_pred(
-                exp_excluded_batch.x, exp_excluded_batch.edge_index, exp_excluded_batch.batch
-            )[0]
-            exp_excluded_pred = exp_excluded_logits.argmax(dim=1).item()
-
-            if exp_excluded_pred == (1 - ori_pred[i]):
-                fidel_minus_count += 1
-        # else: empty non-explanation graph, skip (cannot compute fidelity)
+    for i in range(len(ori_pred)):
+        if exp_pred[i] == ori_pred[i] and ori_pred[i] == 0:
+            fidel_minus_count += 1
+        if exp_excluded_pred[i] == ori_pred[i] and ori_pred[i] == 0:
+            fidel_plus_count += 1
 
     return fidel_plus_count, fidel_minus_count
 
@@ -246,17 +233,13 @@ def compute_fidelity_prob(args, ori_graphs, cf_graphs, ori_prob, gnn):
 
 def compute_sparsity(args, ori_graphs, cf_graphs):
     ori_graphs, cf_graphs = ori_graphs.to_data_list(), cf_graphs.to_data_list()
-    # extract_explanatory_subgraph now returns both explain and non-explain graphs
-    results = [extract_explanatory_subgraph(ori, cf) for ori, cf in zip(ori_graphs, cf_graphs)]
-    exp_graphs = [r[0] for r in results]  # Explanation subgraphs
+    exp_graphs = [extract_explanatory_subgraph(ori, cf) for ori, cf in zip(ori_graphs, cf_graphs)]
 
     exp_num_edges = [exp.num_edges for exp in exp_graphs]
     ori_num_edges = [ori.num_edges for ori in ori_graphs]
 
     sparsity = 0.0
     for ori_e, exp_e in zip(ori_num_edges, exp_num_edges):
-        if ori_e > 0:
-            sparsity += 1 - (exp_e / ori_e)
-        # else: original graph has no edges, skip
+        sparsity += 1 - (exp_e / ori_e)
 
     return sparsity

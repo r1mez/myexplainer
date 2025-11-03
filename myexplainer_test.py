@@ -55,7 +55,7 @@ def parse_args():
     parser.add_argument("--max_subgraph_nodes", type=int, default=20, help="Maximum number of subgraph nodes.")     # 53, 20
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate.")
 
-    parser.add_argument("--visualize", type=bool, default=True, help="Whether to visualize counterfactuals.")
+    parser.add_argument("--visualize", type=bool, default=False, help="Whether to visualize counterfactuals.")
 
     return parser.parse_args()
 
