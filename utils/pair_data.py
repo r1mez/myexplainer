@@ -456,6 +456,7 @@ class GraphTrainData(Dataset):
         self.pred_labels = []  # 存储GNN预测的标签
         self.sub_masks = []  # 预计算的频繁子图掩码
         self.dataset_name = args.dataset
+        self.thresh = args.threshold
 
         # 预处理：从dataloader中提取所有图并进行预测
         print("  Processing graphs and computing subgraph masks...")
@@ -490,6 +491,15 @@ class GraphTrainData(Dataset):
                 # 逐个处理batch中的图
                 num_graphs = data.num_graphs
                 for i in range(num_graphs):
+
+                    # 计算最大预测概率
+                    pred_label = torch.argmax(pred_probs[i]).item()
+                    max_prob = pred_probs[i, pred_label].item()
+
+                    # 仅当置信度 >= 0.9 时才添加
+                    if max_prob < self.thresh:
+                        continue
+
                     # 提取单个图的数据
                     mask = (batch_idx == i)
                     node_x = x[mask]
@@ -525,7 +535,6 @@ class GraphTrainData(Dataset):
                     self.graphs.append(graph_data)
 
                     # 保存预测标签
-                    pred_label = torch.argmax(pred_probs[i]).item()
                     self.pred_labels.append(pred_label)
 
     def _precompute_masks(self):

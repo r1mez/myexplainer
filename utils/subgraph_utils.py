@@ -275,18 +275,24 @@ def concat_graphs(args, outputs, batch):
         # Reconstruct node features
         recon_x = orig.x.clone()
         if real_n > 0:
-            # 将连续值离散化为one-hot编码
-            # x_recon[i, real_indices]: (real_n, x_dim) 连续值
-            x_recon_sub = x_recon[i, real_indices]  # (real_n, x_dim)
-            # 取argmax获取类别索引
+            x_recon_sub = x_recon[i, real_indices]  # (real_n, x_dim) 连续值
+
+            # Straight-Through Estimator: 前向用离散值，反向传连续梯度
             atom_indices = torch.argmax(x_recon_sub, dim=-1)  # (real_n,)
-            # 转换为one-hot
             x_recon_onehot = torch.zeros_like(x_recon_sub)  # (real_n, x_dim)
             x_recon_onehot.scatter_(1, atom_indices.unsqueeze(-1), 1.0)
+
+            if args.train_mode:
+                # 训练模式：使用 STE
+                # 前向：one-hot 离散值
+                # 反向：梯度绕过 argmax，直接传给 x_recon_sub
+                x_recon_final = x_recon_onehot - x_recon_sub.detach() + x_recon_sub
+            else:
+                # 评估模式：纯离散化
+                x_recon_final = x_recon_onehot
+
             # 赋值到原图
-            recon_x[mapping] = x_recon_onehot
-        # if real_n > 0:
-        #     recon_x[mapping] = x_recon[i, real_indices]
+            recon_x[mapping] = x_recon_final
 
         # Reconstruct edge_index
         sub_nodes_mask = torch.zeros(orig.num_nodes, dtype=torch.bool, device=device)
@@ -301,8 +307,16 @@ def concat_graphs(args, outputs, batch):
         # Add reconstructed within-subgraph edges
         if real_n > 0:
             adj_sub = adj_recon[i, real_indices[:, None], real_indices[None, :]]  # (real_n, real_n)
-            adj_thresh = (adj_sub > 0.5).float()
-            sub_edge_index_sub, _ = dense_to_sparse(adj_thresh)
+            adj_hard = (adj_sub > 0.5).float()
+            if args.train_mode:
+                # 训练模式：使用 STE
+                # 前向：adj_hard 离散值 (下游 dense_to_sparse 生成离散边)
+                # 反向：梯度绕过阈值化，直接传给 adj_sub
+                adj_final = adj_hard - adj_sub.detach() + adj_sub
+            else:
+                # 评估模式：纯离散化 (无梯度)
+                adj_final = adj_hard
+            sub_edge_index_sub, _ = dense_to_sparse(adj_final)
             if sub_edge_index_sub.size(1) > 0:
                 sub_edge_index_full = torch.stack([
                     mapping[sub_edge_index_sub[0]],

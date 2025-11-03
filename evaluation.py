@@ -9,27 +9,37 @@ from typing import Dict
 
 import torch
 from torch_geometric.utils import to_dense_adj, to_dense_batch
+from torch_geometric.data import Batch
 from tqdm import tqdm
 
 from utils import concat_graphs
-
+from utils.graph_utils import extract_explanatory_subgraph, exclude_explanatory_subgraph
 import torch.nn.functional as F
 
 
 def evaluate(args, model, gnn, data_loader):
     model.eval()
     gnn.eval()
+    args.train_mode = False
 
     device = args.device
     max_sub_nodes = args.max_subgraph_nodes
 
     proximity = 0.0
     valid_cf = 0
+    fidel_plus_count = 0
+    fidel_minus_count = 0
+    fidel_sum = 0.00
+    sparsity_sum = 0.00
+
+
     total = data_loader.dataset.__len__()
+    total_0 = 0
+    total_1 = 0
     num_batches = 0  # 添加batch计数
 
     with torch.no_grad():
-        for batch in tqdm(data_loader, desc="Evaluating validity"):
+        for batch in tqdm(data_loader, desc="Evaluating:"):
             graphs_batch = batch["graphs"].to(device)
             subgraphs_batch = batch["subgraphs"].to(device)
             batch["graphs"] = graphs_batch
@@ -42,7 +52,11 @@ def evaluate(args, model, gnn, data_loader):
             ori_pred_logits = gnn.get_pred(
                 graphs_batch.x, graphs_batch.edge_index, graphs_batch.batch
             )[0]
+            ori_prob = F.softmax(ori_pred_logits, dim=1)
             ori_pred = ori_pred_logits.argmax(dim=1)
+            # 计算有多少个0类样本
+            total_0 += (ori_pred == 0).sum().item()
+            total_1 += (ori_pred == 1).sum().item()
 
             cf_pred = 1 - ori_pred
             y_cf = cf_pred.float().unsqueeze(1)
@@ -73,16 +87,32 @@ def evaluate(args, model, gnn, data_loader):
 
             valid_cf += count_valid(cf_pred, concated_graphs, gnn)
             proximity += compute_proximity(args, concated_graphs, graphs_batch)
+            fidel_plus, fidel_minus = compute_fidelity(args, graphs_batch, concated_graphs, ori_pred, gnn)
+            fidel_sum += compute_fidelity_prob(args, graphs_batch, concated_graphs, ori_prob, gnn)
+            sparsity_sum += compute_sparsity(args, graphs_batch, concated_graphs)
+            fidel_plus_count += fidel_plus
+            fidel_minus_count += fidel_minus
+
             num_batches += 1
 
-
     validity = valid_cf / total if total > 0 else 0.0
-    # 计算平均proximity
+    sparsity = sparsity_sum / total if total > 0 else 0.0
     avg_proximity = proximity / num_batches if num_batches > 0 else 0.0
+    fidelity_plus = 1 - fidel_plus_count / total if total > 0 else 0.0
+    fidelity_minus = 1 - fidel_minus_count / total if total > 0 else 0.0
+    fidelity = fidel_sum / total if total > 0 else 0.0
+
+
+    args.train_mode = True
 
     return {
         "validity": validity,
         "proximity": avg_proximity,  # 返回平均值
+        "fidelity+": fidelity_plus,
+        "fidelity-": fidelity_minus,
+        "fidelity": fidelity,
+        "sparsity": sparsity,
+
         "successful": valid_cf,
         "total": total,
     }
@@ -147,150 +177,86 @@ def compute_proximity(args, cf_graphs, ori_graphs):
     return distances.mean().item()
 
 
-# def compute_validity(args, model, gnn, data_loader) -> Dict[str, float]:
-#     """Compute counterfactual validity on a preprocessed evaluation loader.
-#
-#     The ``data_loader`` must yield batches identical to those consumed during
-#     training, i.e. dictionaries containing ``graphs`` (original graphs) and
-#     ``subgraphs`` (the corresponding frequent-subgraph reconstructions produced
-#     from the SMILES vocabulary). Each batch is processed by:
-#
-#     1. Running the frozen GNN to obtain the original predictions.
-#     2. Flipping the predictions to create desired counterfactual labels.
-#     3. Passing the frequent subgraphs through MyExplainer to reconstruct a
-#        counterfactual subgraph.
-#     4. Stitching the reconstructed subgraph back into the original graph via
-#        :func:`utils.concat_graphs`.
-#     5. Re-evaluating the stitched graphs with the GNN to determine how many
-#        achieve the desired label.
-#
-#     Args:
-#         args: Runtime configuration. Must expose ``device``, ``x_dim`` and
-#             ``max_subgraph_nodes`` that match the data loader's preprocessing.
-#         model: Trained MyExplainer instance.
-#         gnn: Frozen task GNN used for validation.
-#         data_loader: ``DataLoader`` created from ``GraphTrainData`` with
-#             ``train_collate_fn`` so that each batch mirrors the training
-#             pipeline's preprocessing.
-#
-#     Returns:
-#         Dict[str, float]: ``validity`` (success rate), ``successful`` counter-
-#         factuals, and ``total`` evaluated samples.
-#     """
-#
-#     model.eval()
-#     gnn.eval()
-#
-#     device = args.device
-#     max_sub_nodes = args.max_subgraph_nodes
-#
-#     ged_weights = (1.0, 1.0, 0.0)
-#
-#     proximity = 0.0
-#     successful_cf = 0
-#     total_cf = 0
-#
-#     with torch.no_grad():
-#         for batch in tqdm(data_loader, desc="Evaluating validity"):
-#             graphs_batch = batch["graphs"].to(device)
-#             subgraphs_batch = batch["subgraphs"].to(device)
-#             batch["graphs"] = graphs_batch
-#             batch["subgraphs"] = subgraphs_batch
-#
-#             batch_size = graphs_batch.num_graphs
-#             if batch_size == 0:
-#                 continue
-#
-#             ori_pred_logits = gnn.get_pred(
-#                 graphs_batch.x, graphs_batch.edge_index, graphs_batch.batch
-#             )[0]
-#             ori_pred = ori_pred_logits.argmax(dim=1)
-#
-#             cf_pred = 1 - ori_pred
-#             y_cf = cf_pred.float().unsqueeze(1)
-#
-#             zero_template = torch.zeros(max_sub_nodes, args.x_dim, device=device)
-#             subgraph_x_list = []
-#
-#             for b in range(batch_size):
-#                 mask = subgraphs_batch.batch == b
-#                 num_nodes = int(mask.sum().item())
-#
-#                 padded = zero_template.clone()
-#                 if num_nodes > 0:
-#                     padded[:num_nodes] = subgraphs_batch.x[mask]
-#
-#                 subgraph_x_list.append(padded)
-#
-#             subgraph_x = torch.stack(subgraph_x_list, dim=0)
-#             subgraph_adj = to_dense_adj(
-#                 subgraphs_batch.edge_index,
-#                 batch=subgraphs_batch.batch,
-#                 max_num_nodes=max_sub_nodes,
-#             )
-#
-#             outputs = model(features=subgraph_x, adj=subgraph_adj, y_cf=y_cf)
-#
-#             concated_graphs = concat_graphs(args, outputs, batch)
-#
-#             pred_logits_cf = gnn.get_pred(
-#                 concated_graphs.x,
-#                 concated_graphs.edge_index,
-#                 concated_graphs.batch,
-#             )[0]
-#             pred_labels_cf = pred_logits_cf.argmax(dim=1)
-#
-#             successful_cf += (pred_labels_cf == cf_pred).sum().item()
-#             total_cf += batch_size
-#
-#             proximity += model.compute_proximity(
-#                 outputs,
-#                 ged_weights,
-#                 batch,
-#                 subgraphs_batch,
-#                 graphs_batch,
-#             )
-#
-#
-#     validity = successful_cf / total_cf if total_cf > 0 else 0.0
-#
-#     return {
-#         "validity": validity,
-#         "successful": successful_cf,
-#         "total": total_cf,
-#     }
+def compute_fidelity(args, ori_graphs, cf_graphs, ori_pred, gnn):
+    ori_graphs, cf_graphs = ori_graphs.to_data_list(), cf_graphs.to_data_list()
+
+    # extract_explanatory_subgraph now returns both explain and non-explain graphs
+    results = [extract_explanatory_subgraph(ori, cf) for ori, cf in zip(ori_graphs, cf_graphs)]
+    exp_graphs = [r[0] for r in results]  # Explanation subgraphs
+    # Use exclude_explanatory_subgraph to get non-explanation subgraphs
+    exp_excluded_graphs = [exclude_explanatory_subgraph(ori, cf) for ori, cf in zip(ori_graphs, cf_graphs)]
+
+    fidel_plus_count = 0
+    fidel_minus_count = 0
+
+    # Process each graph individually to handle empty graphs properly
+    for i in range(len(ori_graphs)):
+        exp_graph = exp_graphs[i]
+        exp_excluded_graph = exp_excluded_graphs[i]
+
+        # Fidelity+: explanation subgraph should preserve original prediction
+        if exp_graph.num_nodes > 0:
+            exp_batch = Batch.from_data_list([exp_graph]).to(args.device)
+            exp_pred_logits = gnn.get_pred(
+                exp_batch.x, exp_batch.edge_index, exp_batch.batch
+            )[0]
+            exp_pred = exp_pred_logits.argmax(dim=1).item()
+
+            if exp_pred == ori_pred[i]:
+                fidel_plus_count += 1
+        # else: empty explanation graph, skip (cannot compute fidelity)
+
+        # Fidelity-: non-explanation subgraph should flip to counterfactual prediction
+        if exp_excluded_graph.num_nodes > 0:
+            exp_excluded_batch = Batch.from_data_list([exp_excluded_graph]).to(args.device)
+            exp_excluded_logits = gnn.get_pred(
+                exp_excluded_batch.x, exp_excluded_batch.edge_index, exp_excluded_batch.batch
+            )[0]
+            exp_excluded_pred = exp_excluded_logits.argmax(dim=1).item()
+
+            if exp_excluded_pred == (1 - ori_pred[i]):
+                fidel_minus_count += 1
+        # else: empty non-explanation graph, skip (cannot compute fidelity)
+
+    return fidel_plus_count, fidel_minus_count
 
 
-def compute_ged(original_data, cf_data, weights=(1.0, 1.0, 0.0)):
-    rho, beta, gamma = weights
+def compute_fidelity_prob(args, ori_graphs, cf_graphs, ori_prob, gnn):
+    ori_graphs, cf_graphs = ori_graphs.to_data_list(), cf_graphs.to_data_list()
+    # exp_graphs = [extract_explanatory_subgraph(ori, cf) for ori, cf in zip(ori_graphs, cf_graphs)]
+    exp_excluded_graphs = [exclude_explanatory_subgraph(ori, cf) for ori, cf in zip(ori_graphs, cf_graphs)]
 
-    # 提取矩阵
-    orig_adj = original_data.adj  # 假设稀疏或稠密邻接矩阵
-    cf_adj = cf_data.adj
-    orig_node_feat = original_data.x
-    cf_node_feat = cf_data.x
-    orig_edge_feat = original_data.edge_attr if hasattr(original_data, 'edge_attr') else None
-    cf_edge_feat = cf_data.edge_attr if hasattr(cf_data, 'edge_attr') else None
+    excluded_graphs_batch = Batch.from_data_list(exp_excluded_graphs).to(args.device)
 
-    # 计算原始距离
-    d_adj = F.frobenius_norm(orig_adj - cf_adj)
-    d_node = F.mse_loss(orig_node_feat, cf_node_feat, reduction='sum')  # 用 sum 以匹配范数
-    d_edge = 0.0
-    if orig_edge_feat is not None and cf_edge_feat is not None:
-        d_edge = F.mse_loss(orig_edge_feat, cf_edge_feat, reduction='sum')
 
-    # 获取节点/边数（PyG Data 对象直接可用）
-    n_orig, n_cf = orig_node_feat.size(0), cf_node_feat.size(0)
-    m_orig, m_cf = orig_adj.sum().item() / 2 if orig_adj.is_sparse else orig_adj.sum().item()  # 假设无向图，边数 = 非零/2
-    m_orig_cf = cf_adj.sum().item() / 2 if cf_adj.is_sparse else cf_adj.sum().item()
+    fidelity_sum = 0.00
+    ori_pred = ori_prob.argmax(dim=1)
 
-    max_n = max(n_orig, n_cf)
-    max_m = max(m_orig, m_cf)
+    excluded_pred_logits = gnn.get_pred(
+        excluded_graphs_batch.x, excluded_graphs_batch.edge_index, excluded_graphs_batch.batch
+    )[0]
+    excluded_prob = F.softmax(excluded_pred_logits, dim=1)
 
-    # 归一化
-    norm_d_adj = d_adj / max_m if max_m > 0 else 0.0
-    norm_d_node = d_node / max_n if max_n > 0 else 0.0
-    norm_d_edge = d_edge / max_m if max_m > 0 else 0.0
+    for i in range(len(ori_pred)):
+        excluded_prob_single = excluded_prob[i, ori_pred[i]].item()
+        ori_prob_single = ori_prob[i, ori_pred[i]].item()
+        fidelity_sum += (ori_prob_single - excluded_prob_single)
 
-    # 加权求和
-    return rho * norm_d_adj + beta * norm_d_node + gamma * norm_d_edge
+    return fidelity_sum
+
+def compute_sparsity(args, ori_graphs, cf_graphs):
+    ori_graphs, cf_graphs = ori_graphs.to_data_list(), cf_graphs.to_data_list()
+    # extract_explanatory_subgraph now returns both explain and non-explain graphs
+    results = [extract_explanatory_subgraph(ori, cf) for ori, cf in zip(ori_graphs, cf_graphs)]
+    exp_graphs = [r[0] for r in results]  # Explanation subgraphs
+
+    exp_num_edges = [exp.num_edges for exp in exp_graphs]
+    ori_num_edges = [ori.num_edges for ori in ori_graphs]
+
+    sparsity = 0.0
+    for ori_e, exp_e in zip(ori_num_edges, exp_num_edges):
+        if ori_e > 0:
+            sparsity += 1 - (exp_e / ori_e)
+        # else: original graph has no edges, skip
+
+    return sparsity

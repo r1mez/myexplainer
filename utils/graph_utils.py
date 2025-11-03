@@ -1,11 +1,16 @@
+import networkx as nx
+import numpy as np
 import torch
 from networkx.classes import nodes
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from scipy.spatial.distance import cdist
 from torch_geometric.data import Data
+from torch_geometric.utils import from_networkx
+from typing import Set, Tuple, List
 from data.mutag.smiles import data_to_smiles
 import re
-
+from time import time
 
 MUTAG_atom_map = { 0: 'C', 1: 'O', 2: 'Cl', 3: 'H', 4: 'N', 5: 'F', 6: 'Br', 7: 'S', 8: 'P', 9: 'I', 10: 'Na', 11: 'K', 12: 'Li', 13: 'Ca'}
 BBBP_atom_map = {1: 'H', 5: 'B', 6: 'C', 7: 'N', 8: 'O', 9: 'F', 11: 'Na', 15: 'P', 16: 'S', 17: 'Cl', 20: 'Ca', 35: 'Br', 53: 'I'}
@@ -279,13 +284,188 @@ def _sanitize_with_valence_correction(mol: Chem.RWMol) -> None:
             raise ValueError(f"No atom number in exception: {str(e)}")
 
 
+def extract_explanatory_subgraph(original, counterfactual):
+    """
+        Converts original and counterfactual graphs (both torch_geometric.data.Data)
+        into an explanation subgraph based on the specified logic.
+
+        Logic:
+        - Traverse original graph's edges: if an edge exists in both, exclude it from explanation.
+          If unique to original, include it and its endpoints.
+        - For nodes: include if features differ between original and counterfactual.
+        - Finally, add edges unique to counterfactual.
+
+        Assumes undirected graphs where edge_index may not be sorted, but canonicalizes edges as (min(u,v), max(u,v)) for existence checks.
+        Node features (x) in the output use the original graph's values.
+        """
+    if original.x.size(0) != counterfactual.x.size(0):
+        raise ValueError("Original and counterfactual graphs must have the same number of nodes.")
+
+    num_nodes = original.x.size(0)
+
+    # Get canonical edge sets for existence checks (undirected: (min(u,v), max(u,v)))
+    def get_canonical_edge_set(edge_index: torch.Tensor) -> Set[Tuple[int, int]]:
+        edge_set = set()
+        for i in range(edge_index.size(1)):
+            u = edge_index[0, i].item()
+            v = edge_index[1, i].item()
+            edge_set.add((min(u, v), max(u, v)))
+        return edge_set
+
+    original_edge_set = get_canonical_edge_set(original.edge_index)
+    counterfactual_edge_set = get_canonical_edge_set(counterfactual.edge_index)
+
+    # First, collect changed nodes (node feature differences)
+    changed_nodes: Set[int] = set()
+    for i in range(num_nodes):
+        if not torch.equal(original.x[i], counterfactual.x[i]):
+            changed_nodes.add(i)
+
+    # Collect edges unique to original (keep original direction)
+    explain_edge_indices: List[torch.Tensor] = []
+    for i in range(original.edge_index.size(1)):
+        u = original.edge_index[0, i].item()
+        v = original.edge_index[1, i].item()
+        key = (min(u, v), max(u, v))
+        if key not in counterfactual_edge_set:
+            explain_edge_indices.append(original.edge_index[:, i:i + 1])
+
+    # Collect edges unique to counterfactual (keep counterfactual direction)
+    # for i in range(counterfactual.edge_index.size(1)):
+    #     u = counterfactual.edge_index[0, i].item()
+    #     v = counterfactual.edge_index[1, i].item()
+    #     key = (min(u, v), max(u, v))
+    #     if key not in original_edge_set:
+    #         explain_edge_indices.append(counterfactual.edge_index[:, i:i + 1])
+
+    # Additional rule: Add edges from original that connect two changed nodes
+    for i in range(original.edge_index.size(1)):
+        u = original.edge_index[0, i].item()
+        v = original.edge_index[1, i].item()
+        if u in changed_nodes and v in changed_nodes:
+            # Add the edge (even if it exists in counterfactual, as per rule)
+            explain_edge_indices.append(original.edge_index[:, i:i + 1])
+
+    # Concatenate all explain edges
+    if explain_edge_indices:
+        explain_edge_index = torch.cat(explain_edge_indices, dim=1)
+    else:
+        explain_edge_index = torch.empty((2, 0), dtype=torch.long, device=original.edge_index.device)
+
+    # Collect all relevant nodes: changed + endpoints of explain edges
+    all_nodes: Set[int] = changed_nodes.copy()
+    for i in range(explain_edge_index.size(1)):
+        all_nodes.add(explain_edge_index[0, i].item())
+        all_nodes.add(explain_edge_index[1, i].item())
+
+    if not all_nodes:
+        # Empty explanation graph - all nodes belong to non-explanation graph
+        empty_explain_graph = Data(
+            x=torch.empty((0, original.x.size(1)), dtype=original.x.dtype, device=original.x.device),
+            edge_index=torch.empty((2, 0), dtype=torch.long, device=original.edge_index.device)
+        )
+        # Non-explanation graph is the entire original graph
+        non_explain_graph = Data(x=original.x, edge_index=original.edge_index)
+        return empty_explain_graph, non_explain_graph
+
+        # # Retain the first node (index 0) as a fallback to avoid empty graph
+        # all_nodes.add(0)
+
+    node_list = sorted(all_nodes)
+    num_explain_nodes = len(node_list)
+    node_to_new_idx = {old: new_idx for new_idx, old in enumerate(node_list)}
+
+    # Remap node features (use original's x)
+    explain_x = original.x[node_list]
+
+    # Remap edge indices (only if there are edges)
+    if explain_edge_index.size(1) > 0:
+        new_edge_index = torch.zeros_like(explain_edge_index)
+        for i in range(explain_edge_index.size(1)):
+            new_u = node_to_new_idx[explain_edge_index[0, i].item()]
+            new_v = node_to_new_idx[explain_edge_index[1, i].item()]
+            new_edge_index[0, i] = new_u
+            new_edge_index[1, i] = new_v
+        explain_edge_index = new_edge_index
+    # else: already empty
+
+    # Create explanation graph
+    # Only include x and edge_index to ensure consistent attributes across all graphs in a batch
+    # This prevents KeyError when creating batches with Batch.from_data_list()
+    explain_graph = Data(x=explain_x, edge_index=explain_edge_index)
+
+    # Build non-explanation subgraph by calling exclude_explanatory_subgraph
+    non_explain_graph = exclude_explanatory_subgraph(original, counterfactual)
+
+    return explain_graph, non_explain_graph
 
 
+def exclude_explanatory_subgraph(original: Data, counterfactual: Data) -> Data:
+    """
+    从原图中删除解释子图，返回非解释子图。
 
-# if __name__ == '__main__':
-#     smiles = "Cnc(n)N"
-#     data = smarts_to_data(smiles)
-#     print(data.x)
-#     print(data.edge_index)
-#     print(data.edge_attr)
-#     print(data.smarts)
+    逻辑：
+    - 保留所有节点（节点特征来自原图）
+    - 保留原图中的边，除非：
+      1. 该边在反事实图中不存在，或
+      2. 该边的两个端点的特征在反事实图中都发生了变化
+
+    Args:
+        original (Data): 原图 (torch_geometric.data.Data)
+        counterfactual (Data): 反事实图（节点数与原图相同，一一对应）
+
+    Returns:
+        Data: 非解释子图（包含所有节点，但只保留非解释性的边）
+    """
+    if original.x.size(0) != counterfactual.x.size(0):
+        raise ValueError("Original and counterfactual graphs must have the same number of nodes.")
+
+    num_nodes = original.x.size(0)
+    device = original.x.device
+
+    # 获取规范化边集合（无向边用 (min, max) 表示）
+    def get_canonical_edge_set(edge_index: torch.Tensor) -> Set[Tuple[int, int]]:
+        edge_set = set()
+        for i in range(edge_index.size(1)):
+            u = edge_index[0, i].item()
+            v = edge_index[1, i].item()
+            edge_set.add((min(u, v), max(u, v)))
+        return edge_set
+
+    original_edge_set = get_canonical_edge_set(original.edge_index)
+    counterfactual_edge_set = get_canonical_edge_set(counterfactual.edge_index)
+
+    # 识别特征发生变化的节点
+    changed_nodes: Set[int] = set()
+    for i in range(num_nodes):
+        if not torch.equal(original.x[i], counterfactual.x[i]):
+            changed_nodes.add(i)
+
+    # 收集要保留的边
+    keep_edge_indices: List[torch.Tensor] = []
+    for i in range(original.edge_index.size(1)):
+        u = original.edge_index[0, i].item()
+        v = original.edge_index[1, i].item()
+        edge_key = (min(u, v), max(u, v))
+
+        # 规则4: 如果边在counterfactual中不存在，不保留（这是解释性的边）
+        if edge_key not in counterfactual_edge_set:
+            continue
+
+        # 规则6: 如果边的两个端点特征都发生了变化，不保留（这也是解释性的边）
+        if u in changed_nodes and v in changed_nodes:
+            continue
+
+        # 规则5: 两个图中都存在的边，且不满足规则6，则保留
+        keep_edge_indices.append(original.edge_index[:, i:i+1])
+
+    # 构建非解释子图
+    if keep_edge_indices:
+        keep_edge_index = torch.cat(keep_edge_indices, dim=1)
+    else:
+        keep_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+
+    # 保留所有节点（使用原图的节点特征）
+    non_explain_graph = Data(x=original.x.clone(), edge_index=keep_edge_index)
+
+    return non_explain_graph

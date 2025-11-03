@@ -44,15 +44,15 @@ def parse_args():
 
     # 数据参数
     parser.add_argument('--top_k', type=int, default=1, help='Number of similar graphs for pairing')
-    parser.add_argument('--threshold', type=float, default=0.9, help='Prediction confidence threshold')
+    parser.add_argument('--threshold', type=float, default=0, help='Prediction confidence threshold')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
 
-    parser.add_argument("--loss_recon_x", type=float, default=1.0, help="Reconstruction loss weight for node features")
-    parser.add_argument("--loss_recon_adj", type=float, default=1.0, help="Reconstruction loss weight for adjacency matrix")
+    parser.add_argument("--loss_recon_x", type=float, default=0.0, help="Reconstruction loss weight for node features")
+    parser.add_argument("--loss_recon_adj", type=float, default=5.0, help="Reconstruction loss weight for adjacency matrix")
     parser.add_argument("--loss_diversity", type=float, default=0.0, help="Diversity loss weight")
     parser.add_argument("--loss_distribution", type=float, default=0.0, help="Distribution matching loss weight")
-    parser.add_argument("--loss_kl", type=float, default=0.1, help="KL divergence loss weight")
-    parser.add_argument("--loss_pred", type=float, default=5.0, help="Prediction loss weight")
+    parser.add_argument("--loss_kl", type=float, default=1.0, help="KL divergence loss weight")
+    parser.add_argument("--loss_pred", type=float, default=3.0, help="Prediction loss weight")
 
     # 模型参数
     parser.add_argument('--x_dim', type=int, default=14, help='Node feature dimension (14 for mutag)')
@@ -60,11 +60,11 @@ def parse_args():
     parser.add_argument('--z_dim', type=int, default=32, help='Latent dimension')
     parser.add_argument('--u_dim', type=int, default=32, help='Graph feature dimension')
     parser.add_argument('--edge_attr_dim', type=int, default=3, help='Edge attribute dimension (3 for mutag)')
-    parser.add_argument('--max_num_nodes', type=int, default=28, help='Maximum number of nodes in a graph')
+    parser.add_argument('--max_num_nodes', type=int, default=53, help='Maximum number of nodes in a graph')         # 53, 28
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
 
     # 训练参数
-    parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=30, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
 
@@ -222,29 +222,29 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=False)
     val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
-    smiles_0=[]
-    smiles_1=[]
-    for data in train_loader:
-        data.to(args.device)
-        # 获取预测结果并确定每个样本的类别
-        pred_labels = gnn.get_pred(data.x, data.edge_index, data.batch)[0].argmax(dim=1)
-
-        # 分别处理每个样本
-        for i in range(len(pred_labels)):
-            if pred_labels[i] == 0:
-                smiles_0.append(data.smiles[i] if isinstance(data.smiles, list) else data.smiles)
-            else:
-                smiles_1.append(data.smiles[i] if isinstance(data.smiles, list) else data.smiles)
-
+    # smiles_0=[]
+    # smiles_1=[]
+    # for data in train_loader:
+    #     data.to(args.device)
+    #     # 获取预测结果并确定每个样本的类别
+    #     pred_labels = gnn.get_pred(data.x, data.edge_index, data.batch)[0].argmax(dim=1)
+    #
+    #     # 分别处理每个样本
+    #     for i in range(len(pred_labels)):
+    #         if pred_labels[i] == 0:
+    #             smiles_0.append(data.smiles[i] if isinstance(data.smiles, list) else data.smiles)
+    #         else:
+    #             smiles_1.append(data.smiles[i] if isinstance(data.smiles, list) else data.smiles)
+    #
     # with open(f"data/{args.dataset}/smiles/smiles_0.txt", "w") as f:
     #     for smi in smiles_0:
     #         print(smi, file=f)
     # with open(f"data/{args.dataset}/smiles/smiles_1.txt", "w") as f:
     #     for smi in smiles_1:
     #         print(smi, file=f)
-    # exit()
-    # vocab_len = 100
 
+    # vocab_len = 100
+    #
     # smis_0, _ = graph_bpe(f'data/{args.dataset}/smiles/smiles_0.txt', vocab_len,
     #                       f'data/mutag/smiles_bpe_{vocab_len}_0.txt', 16, False)
     # smis_1, _ = graph_bpe(f'data/{args.dataset}/smiles/smiles_1.txt', vocab_len,
@@ -361,8 +361,30 @@ def main():
     #          'co', 'cs', 'CF', 'C', 'O', 'Cl', 'H', 'N', 'F', 'Br', 'S', 'P', 'I']
 
     # Mutagenicity 100
-    smis_0 = ['O=C1c2ccccc2C(=O)c2c(O)cccc21', 'O=C1c2ccccc2C(=O)c2ccccc21', 'c1ccc2c(c1)ccc1ccccc12', 'c1ccc2nc3ccccc3cc2c1', 'c1ccc2cc3ccccc3cc2c1', 'ccccccc1ccccc1', 'O=[N+]([O-])c1cccc([N+](=O)[O-])c1', 'c1ccc(c2ccccc2)cc1', 'Nc1ccc2ccccc2c1', 'cccccccc[N+](=O)[O-]', 'Nc1cccc2ccccc12', 'c1ccc2ccccc2c1', 'c1ccc2ncccc2c1', 'ccccc1ccccc1', 'Cc1ccccc1[N+](=O)[O-]', 'c1ccc2[nH]ccc2c1', 'Nc1ccc([N+](=O)[O-])cc1', 'Cc1ccc([N+](=O)[O-])cc1', 'c1ccc2occcc2c1', 'O=[N+]([O-])c1ccccc1', 'cccc1ccccc1', 'Cc1ccc([N+](=O)[O-])o1', 'cccccccc', 'ccc1ccccc1', 'O=Cc1ccccc1', 'Cc1ccccc1N', 'CCc1ccccc1', 'CNc1ccccc1', 'Cc1ccccc1', 'Nc1ccccc1', 'Oc1ccccc1', 'nc1ccccc1', 'cc1ccccc1', 'c1ccccc1', 'c1ccncc1', 'cccccc', 'CCOCCO', 'Cc1ccco1', 'c1cncnc1', 'CCNCCN', 'ccccC', 'O=[SH](=O)O', 'c1ccsc1', 'CC(O)CO', 'c1cncn1', 'CCNC=O', 'Cnc(n)N', 'CCNCC', 'ccccn', 'cccc', 'CCNC', 'CC1CO1', 'cccn', 'CC(N)=O', 'CC(=O)O', 'OCCO', 'CCCC', 'Cncn', 'CCOP', 'CCCO', 'ccnc', 'CC(C)O', 'cncn', 'CCO', 'O=[N+][O-]', 'CCN', 'ccn', 'CC=O', 'CCCl', 'CCC', 'C1CO1', 'CNC', 'O=S=O', 'ncn', 'NC=O', 'O=CO', 'ClCCl', 'cc', 'CC', '[N+][O-]', 'cn', 'CO', 'CN', 'O=S', 'CCl', 'N=O', 'NO', 'H', 'B', 'C', 'N', 'O', 'F', 'Na', 'P', 'S', 'Cl', 'Ca', 'Br', 'I']
-    smis_1 = ['OCC1OCC(O)CC1O', 'c1ccc2[nH]ccc2c1', 'CC(=O)Nc1ccccc1', 'c1ccc2ccccc2c1', 'c1ccc2occcc2c1', 'c1ccc2ncccc2c1', 'O=C(O)c1ccccc1', 'FC(F)c1ccccc1', 'CC(=O)c1ccccc1', 'cccc1ccccc1', 'CCCCCC(C)CC', 'CCCCCCCC', 'O=Cc1ccccc1', 'COc1ccccc1', 'FCc1ccccc1', 'Clc1cccc(Cl)c1', 'ccc1ccccc1', 'Oc1ccccc1Br', 'Oc1ccc(Cl)cc1', 'Cc1ccc(O)cc1', 'Cc1ccccc1', 'Oc1ccccc1', 'Clc1ccccc1', 'Nc1ccccc1', 'Brc1ccccc1', 'CCCCC(=O)O', 'c1ccccc1', 'c1ccncc1', 'CCCC(=O)O', 'c1cncnc1', 'CC(O)CCO', 'CCCC(C)O', 'CCCC(C)C', 'C1CCCCC1', 'CCCCCC', 'CCC(O)CO', 'CCCCO', 'CCC(C)C', 'CCCC=O', 'CCCCC', 'O=[SH](=O)O', 'CCC(C)O', 'CCC(=O)O', 'ccccc', 'CCC(C)=O', 'CCNCC', 'N[SH](=O)=O', 'C=C(C)C=O', 'CC(O)CO', 'CCC(N)=O', 'cccc', 'CCCC', 'CCC=O', 'CC(=O)O', 'CC(C)C', 'cncn', 'CC(N)=O', 'CCCO', 'OCCO', 'CC(C)O', 'CCNC', 'CC=CC', 'NCCO', 'CCCCl', 'CC(C)N', 'CC(C)=O', 'CCC', 'CCO', 'CCN', 'O=CO', 'O=S=O', 'CC=O', 'NC=O', 'ccn', 'CNC', 'c[nH]', 'COP', 'ccc', 'nc=O', 'CC', 'cc', 'CO', 'CN', 'cn', 'O=S', 'OP', 'C[N+]', 'H', 'B', 'C', 'N', 'O', 'F', 'Na', 'P', 'S', 'Cl', 'Ca', 'Br', 'I']
+    smis_0 = ['O=C1c2ccccc2C(=O)c2c(O)cccc21', 'O=C1c2ccccc2C(=O)c2ccccc21', 'c1cc2ccc3cccc4ccc(c1)c2c34',
+             'c1ccc2nc3ccccc3cc2c1', 'c1ccc2c(c1)ccc1ccccc12', 'c1ccc2cc3ccccc3cc2c1', 'cccc1cccc2ccccc12',
+             'ccccccc1ccccc1', 'O=[N+]([O-])c1cccc([N+](=O)[O-])c1', 'c1ccc(c2ccccc2)cc1', 'Nc1ccc2ccccc2c1',
+             'Nc1cccc2ccccc12', 'c1ccc2ccccc2c1', 'c1ccc2ncccc2c1', 'ccccc1ccccc1', 'Cc1ccc([N+](=O)[O-])cc1',
+             'Cc1ccccc1[N+](=O)[O-]', 'Nc1ccc([N+](=O)[O-])cc1', 'c1ccc2occcc2c1', 'O=[N+]([O-])c1ccccc1',
+             'cccc1ccccc1', 'c1ccc(C2CO2)cc1', 'Cc1ccc([N+](=O)[O-])o1', 'cccccccc', 'ccc1ccccc1', 'O=Cc1ccccc1',
+             'CCc1ccccc1', 'Cc1ccccc1N', 'CNc1ccccc1', 'N=Nc1ccccc1', 'O=[N+]([O-])c1cccs1', 'Cc1ccccc1', 'Nc1ccccc1',
+             'Oc1ccccc1', 'cccc[N+](=O)[O-]', 'nc1ccccc1', 'c1ccccc1', 'c1ccncc1', 'Cc1ccco1', 'c1cncnc1', 'CCOCCO',
+             'ccccC', 'O=[SH](=O)O', 'c1cncn1', 'CC(O)CO', 'ccccn', 'CCNCC', 'CCNC=O', 'Cnc(n)N', 'cccc', 'CCNC',
+             'CC1CO1', 'CC(N)=O', 'cccn', 'OCCO', 'CC(=O)O', 'CCCC', 'CCCO', 'Cncn', 'cncn', 'CC(C)O', 'O=CCCl', 'CCO',
+             'O=[N+][O-]', 'CCN', 'CC=O', 'ccn', 'CCCl', 'O=S=O', 'CCC', 'CNC', 'NC=O', 'ncn', 'ccc', 'O=CO', 'ClCCl',
+             'C1CO1', 'cc', 'CC', '[N+][O-]', 'cn', 'CO', 'CN', 'O=S', 'CCl', 'N=O', 'NO', 'H', 'B', 'C', 'N', 'O', 'F',
+             'Na', 'P', 'S', 'Cl', 'Ca', 'Br', 'I']
+    smis_1 = ['CCCCCCCCCCCC', 'OCC1OCC(O)CC1O', 'c1ccc2[nH]ccc2c1', 'c1ccc2ncccc2c1', 'CC(=O)Nc1ccccc1',
+             'c1ccc2ccccc2c1', 'O=C(O)c1ccccc1', 'FC(F)c1ccccc1', 'CCCCCCCCC', 'CCCCCCCC', 'O=Cc1ccccc1',
+             'Clc1cccc(Cl)c1', 'ccc1ccccc1', 'FCc1ccccc1', 'COc1ccccc1', 'Cc1ccc(O)cc1', 'Oc1ccccc1Br', 'CCc1ccccc1',
+             'Cc1ccccc1', 'Clc1ccccc1', 'Oc1ccccc1', 'Nc1ccccc1', 'Brc1ccccc1', 'CCCCC(=O)O', 'c1ccccc1', 'c1ccncc1',
+             'CCCC(=O)O', 'c1cncnc1', 'CCOCCO', 'CC(O)CCO', 'CCCC(C)C', 'CCCC(C)O', 'CCC(O)CO', 'C=C(C)C(=O)O',
+             'C1CCCCC1', 'CCCCO', 'CCC(C)C', 'CCCC=O', 'CCCCC', 'O=[SH](=O)O', 'CCC(C)O', 'CCC(=O)O', 'CCNCC',
+             'CCC(C)=O', 'C=CC(=O)O', 'ccccc', 'COPOC', 'cccc', 'CCCC', 'CC(=O)O', 'cncn', 'CC(C)C', 'CC(C)O',
+             'CC(N)=O', 'CCCO', 'OCCO', 'CCNC', 'CCC=O', 'NCCO', 'CC=CC', 'CCCCl', 'ccc=O', 'CCO', 'CCC', 'CCN', 'O=CO',
+             'NC=O', 'O=S=O', 'CC=O', 'CNC', 'ccn', 'ccc', 'COP', 'c[nH]', 'CCF', 'O=[N+][O-]', 'CC', 'cc', 'CO', 'CN',
+             'cn', 'O=S', 'OP', 'C=O', 'CS', '[N+][O-]', 'C[N+]', 'H', 'B', 'C', 'N', 'O', 'F', 'Na', 'P', 'S', 'Cl',
+             'Ca', 'Br', 'I']
 
     # BBBP 500
     # smis_0 = ['CC(C)C1NC(=O)[C@@H](C(C)C)OC(=O)[C@H](C(C)C)NC(=O)[C@H](C)OC(=O)[C@@H](C(C)C)NC(=O)[C@@H](C(C)C)OC(=O)[C@H](C(C)C)NC(=O)[C@H](C)OC(=O)[C@@H](C(C)C)NC(=O)[C@@H](C(C)C)OC(=O)[C@H](C(C)C)NC(=O)[C@H](C)OC1=O', 'CC(C)[C@@H]1NC(=O)[C@H](C)OC(=O)CNC(=O)[C@@H](C(C)C)OC(=O)[C@H](C(C)C)NC(=O)[C@H](C)OC(=O)[C@@H](C(C)C)NC(=O)[C@@H](C(C)C)OC(=O)[C@H](C(C)C)NC(=O)[C@H](C)OC(=O)[C@@H](C(C)C)NC(=O)[C@@H](C(C)C)OC1=O', 'CC(C)[C@@H]1NC(=O)[C@H](C)OC(=O)CNC(=O)[C@@H](C(C)C)OC(=O)[C@H](C(C)C)NC(=O)[C@H](C)OC(=O)[C@@H](C(C)C)NC(=O)[C@@H](C(C)C)OC(=O)[C@H](C(C)C)NC(=O)[C@H](C)OC(=O)CNC(=O)[C@@H](C(C)C)OC1=O', 'CC(C)[C@@H]1NC(=O)[C@H](C)OC(=O)CNC(=O)[C@@H](C(C)C)OC(=O)[C@H](C(C)C)NC(=O)[C@H](C)OC(=O)CNC(=O)[C@@H](C(C)C)OC(=O)[C@H](C(C)C)NC(=O)[C@H](C)OC(=O)CNC(=O)[C@@H](C(C)C)OC1=O', 'CC[C@H]1OC(=O)[C@H](C)[C@@H](O[C@H]2C[C@@](C)(OC)[C@@H](O)[C@H](C)O2)[C@H](C)[C@@H](O[C@@H]2O[C@H](C)C[C@H](N(C)C)[C@H]2O)[C@](C)(O)CC(C)C(=O)[C@H](C)[C@@H](O)[C@]1(C)O', 'CO[C@H]1/C=C/O[C@@]2(C)Oc3c(C)c(O)c4c(O)c(ccc4c3C2=O)NC(=O)/C(C)=C\\C=C\\[C@H](C)[C@H](O)[C@@H](C)[C@@H](O)[C@@H](C)[C@H](OC(C)=O)[C@@H]1C', 'CO[C@H]1/C=C/O[C@@]2(C)Oc3ccc4cc(c5scnc5c4c3C2=O)NC(=O)/C(C)=C\\C=C\\[C@H](C)[C@H](O)[C@@H](C)[C@@H](O)[C@@H](C)[C@H](OC(C)=O)[C@@H]1C', 'CO[C@H]1/C=C/O[C@@]2(C)Oc3cc(O)c4c(O)c(ccc4c3C2=O)NC(=O)/C(C)=C\\C=C\\[C@H](C)[C@H](O)[C@@H](C)[C@@H](O)[C@@H](C)[C@H](OC(C)=O)[C@@H]1C', 'CC(C)[C@H](NC(=O)[C@H](C)O)C(=O)O[C@@H](C(=O)NCC(=O)O[C@@H](C)C(=O)N[C@H](C(=O)O[C@@H](C(=O)NCC=O)C(C)C)C(C)C)C(C)C', 'CC[C@H](CC(O)[C@@H](OC(=O)c1ccccc1)[C@H]1C(C)[C@@H](O)C[C@H]2OC[C@@]12OC(C)=O)OC(=O)[C@H](O)[C@@H](N)c1ccccc1', 'COc1cccc2c1C(=O)c1c(O)c3c(c(O)c1C2=O)C[C@@](O)(C(=O)CO)C[C@@H]3O[C@H]1C[C@H](N)[C@H](O)[C@H](C)O1', 'CC[C@H](CC(O)[C@H](C[C@]1(OC(C)=O)COC1)OC(=O)c1ccccc1)OC(=O)[C@H](O)[C@@H](N)c1ccccc1', 'CC[C@H](CC(O)[C@H](CC(CO)OC(C)=O)OC(=O)c1ccccc1)OC(=O)[C@H](O)[C@@H](N)c1ccccc1', 'COc1cccc2c1C(=O)c1c(O)c3c(c(O)c1C2=O)CC(O)C[C@@H]3O[C@H]1C[C@H](N)[C@H](O)[C@H](C)O1', 'CC[C@H](O[C@H]1C[C@@](C)(OC)[C@@H](O)[C@H](C)O1)[C@@H](C)C(=O)O[C@H](CC)[C@@](C)(O)[C@H](O)[C@@H](C)C=O', 'CO[C@@H](/C=C/O)[C@@H](C)[C@@H](OC(C)=O)[C@H](C)[C@H](O)[C@H](C)[C@@H](O)[C@@H](C)/C=C/C=C(/C)C(N)=O', 'CC1(C)S[C@@H]2[C@H](NC(=O)C(C(=O)Oc3ccc4c(c3)CCC4)c3ccccc3)C(=O)N2[C@H]1C(=O)O', 'C[C@@H]1[C@@H](O)[C@@H](C)C[C@]2(CO2)C(=O)[C@H](C)[C@@H](O)[C@@H](C)[C@@H](C)OC(=O)[C@H](C)[C@H]1O', 'CN(C)[C@@H]1C(=O)/C(=C(\\N)O)C(=O)[C@@]2(O)C(=O)C3=C(O)c4c(O)cccc4[C@@](C)(O)[C@H]3C[C@@H]12', 'CN(C)[C@@H]1C(=O)/C(=C(\\N)O)C(=O)[C@@]2(O)C(=O)C3=C(O)c4c(O)cccc4[C@@H](O)[C@H]3C[C@@H]12', 'CC1(C)S[C@@H]2[C@H](NC(=O)C(C(=O)Oc3ccccc3)c3ccccc3)C(=O)N2[C@H]1C(=O)O', 'COc1cccc2c1C(=O)c1c(O)c3c(c(O)c1C2=O)CC(O)C[C@H]3OC1CC(N)CC(C)O1', 'CN(C)[C@@H]1C(=O)/C(=C(\\N)O)C(=O)[C@@]2(O)C(=O)C3=C(O)c4c(O)cccc4C[C@H]3[C@H](O)[C@@H]12', 'CN(C)[C@@H]1C(=O)/C(=C/O)C(=O)[C@@]2(O)C(=O)C3=C(O)c4c(O)cccc4[C@@](C)(O)[C@H]3C[C@@H]12', 'C/C=C/[C@H](C)[C@H](O)[C@@H](C)[C@@H](O)[C@@H](C)[C@H](OC(C)=O)[C@H](C)[C@H](/C=C/O)OC', 'CN(C)[C@@H]1C(=O)/C(=C(\\N)O)C(=O)[C@@]2(O)C(=O)C3=C(O)c4c(O)cccc4C[C@H]3C[C@@H]12', 'NCC1OC(OC2C(N)CC(N)C(OC3OC(CO)C(O)C(N)C3O)C2O)C(N)C(O)C1O', 'CC[C@H](O[C@H]1C[C@@](C)(OC)[C@@H](O)[C@H](C)O1)[C@@H](C)C(=O)O[C@H](CC)C(C)O', 'CN(C)C1C(=O)/C(=C(\\N)O)C(=O)C2(O)C(=O)C3=C(O)c4c(O)cccc4C(C)(O)C3CC12', 'CC[C@H](CC(O)[C@H](CC(CO)OC(C)=O)OC(=O)c1ccccc1)OC(=O)CO', 'CC(=O)N1CCN(C(=O)Cc2ccc(C(F)(F)F)cc2)[C@@H](CN2CC[C@@H](O)C2)C1', 'CO[C@@]1(NC(=O)C2SCS2)C(=O)N2C(C(=O)O)=C(CSc3nnnn3C)CS[C@@H]21', 'CC(=O)N1CCN(C(=O)Cc2ccc([N+](=O)[O-])cc2)[C@@H](CN2CC[C@H](O)C2)C1', 'CC(=O)N1CCN(C(=O)Cc2cccc([N+](=O)[O-])c2)[C@@H](CN2CC[C@H](O)C2)C1', 'CO/N=C(\\C(=O)N[C@@H]1C(=O)N2C(C(=O)O)=C(CS)CS[C@H]12)c1csc(N)n1', 'CC1(C)S[C@@H]2[C@H](NC(=O)[C@H](N)c3ccc(O)cc3)C(=O)N2[C@H]1C(=O)O', 'CN[C@@H]1[C@H](O)[C@H](NC)[C@H]2O[C@@]3(O)C(=O)CCO[C@H]3O[C@@H]2[C@H]1O', 'CC(=O)N1CCN(C(=O)Cc2ccc(Cl)c(Cl)c2)[C@@H](CN2CC[C@@H](O)C2)C1', 'CSc1ccc(CC(=O)N2CCN(C(C)=O)C[C@@H]2CN2CC[C@@H](O)C2)cc1', 'CC(=O)N1CCN(C(=O)Cc2cc(F)cc(F)c2)[C@@H](CN2CC[C@@H](O)C2)C1', 'COc1cccc(CC(=O)N2CCN(C(C)=O)C[C@@H]2CN2CC[C@@H](O)C2)c1', 'COc1ccc(CC(=O)N2CCN(C(C)=O)C[C@@H]2CN2CC[C@@H](O)C2)cc1', 'CC1(C)S[C@@H]2[C@H](NC(=O)[C@H](N)c3ccccc3)C(=O)N2[C@H]1C(=O)O', 'CN(C)[C@H]1C[C@](O)(C(=O)C=C(O)c2ccccc2O)C(=O)/C(=C(/N)O)C1=O', 'CC1=C(C(=O)O)N2C(=O)[C@@H](NC(=O)[C@H](N)c3ccc(O)cc3)[C@H]2SC1', 'CO/N=C(\\C(=O)N[C@@H]1C(=O)N2C(C(=O)O)=C(C)CS[C@H]12)c1csc(N)n1', 'CC(=O)N1CCN(C(=O)Cc2cccc(F)c2)[C@@H](CN2CC[C@@H](O)C2)C1', 'CCO[C@@H](CC(O)CC)c1ccc2c(c1O)C(=O)c1c(O)cccc1C2=O', 'CO[C@@H]1CO[C@@H](O[C@H]2[C@H](O)[C@@H](O)[C@H](N)C[C@@H]2N)[C@H](N)C1', 'NC[C@@H]1CC[C@@H](N)[C@@H](O[C@H]2[C@H](O)[C@@H](O)[C@H](N)C[C@@H]2N)O1', 'NC(C(=O)N[C@@H]1C(=O)N2C(C(=O)O)=C(CS)CS[C@H]12)c1ccc(O)cc1', 'CO[C@@]1(NC(=O)CS)C(=O)N2C(C(=O)O)=C(CSc3nnnn3C)CS[C@@H]21', 'Cn1nnnc1SCC1=C(C(=O)O)N2C(=O)C(NC(=O)CNC=O)[C@H]2SC1', 'CN(C)C[C@@H]1C[C@H]2C(=C(O)c3c(O)cccc3[C@@]2(C)O)C(=O)[C@]1(O)C=O', 'CN(C(=O)Cc1ccccc1N)[C@@H](CN1CC[C@@H](O)C1)c1ccccc1', 'CC(=O)N1CCN(C(=O)Cc2ccccc2)[C@@H](CN2CC[C@@H](O)C2)C1', 'COc1cccc2c1C(=O)c1c(O)c3c(c(O)c1C2=O)CC(O)C[C@@H]3O', 'CC(=O)N1CCN(C(=O)Cc2ccccc2)[C@@H](CN2CC[C@H](O)C2)C1', 'CC1=C(C(=O)O)N2C(=O)[C@@H](NC(=O)[C@H](N)c3ccccc3)[C@H]2SC1', 'CO[C@@]1(NC(C)=O)C(=O)N2C(C(=O)O)=C(CSc3nnnn3C)CS[C@@H]21', 'Cc1nnc(SCC2=C(C(=O)O)N3C(=O)[C@@H](NC(=O)CO)[C@H]3SC2)s1', 'Cn1nnnc1SCC1=C(C(=O)O)N2C(=O)[C@@H](NC(=O)CO)[C@H]2SC1', 'Nc1nc(CC(=O)N[C@@H]2C(=O)N3C(C(=O)O)=C(CS)CS[C@H]23)cs1', 'CC(C)[C@H](NC(=O)[C@H](C)O)C(=O)O[C@@H](C(=O)NCC=O)C(C)C', 'CC1(C)S[C@@H]2[C@H](NC(=O)Cc3ccccc3)C(=O)N2[C@H]1C(=O)O', 'CCO[C@@H](CCO)c1ccc2c(c1O)C(=O)c1c(O)cccc1C2=O', 'COc1cccc2c1C(=O)c1c(O)c3c(c(O)c1C2=O)CC(O)CC3O', 'Nc1nc(CC(=O)N[C@@H]2C(=O)N3C(C(=O)O)=C(CO)CS[C@H]23)cs1', 'C=CC1=C(C(=O)O)N2C(=O)[C@@H](NC(=O)Cc3csc(N)n3)[C@H]2SC1', 'CN1CCN(c2c(F)cc3c(=O)c(C(=O)O)cn(CCF)c3c2F)CC1', 'CC1=C(C(=O)O)N2C(=O)[C@@H](NC(=O)Cc3csc(N)n3)[C@H]2SC1', 'NCCO[C@@H](CN)O[C@H]1[C@H](O)[C@@H](O)[C@H](N)C[C@@H]1N', 'Nc1nc(CC(=O)N[C@@H]2C(=O)N3C(C(=O)O)=CCS[C@H]23)cs1', 'CCOC(=O)[C@H](C)[C@@H](O)[C@H](C)[C@@H](O)[C@@H](C)CC1CO1', 'CCNC[C@H]1CN(C(C)=O)CCN1C(=O)Cc1ccccc1', 'CC(=O)N[C@@H]1C(=O)N2C(C(=O)O)=C(COC(C)=O)CS[C@H]12', 'COC1C(=O)N2C(C(=O)O)=C(CSc3nnnn3C)CS[C@H]12', 'CC1(C)SC2C(NC(=O)Cc3ccccc3)C(=O)N2C1C(=O)O', 'CCC[C@@](C)(O)CO[C@@H]1O[C@H](C)C[C@H](N(C)C)[C@H]1O', 'CC[C@H](CC(O)[C@@H](O)CC(CO)OC(C)=O)OC(=O)CO', 'CO/N=C(\\C(=O)NC[C@H](C)NOCC(=O)O)c1csc(N)n1', 'Cc1cn([C@H]2C[C@H](N=[N+]=[N-])[C@@H](CO)O2)c(=O)[nH]c1=O', 'N/C(O)=C(\\C=O)C(=O)C(O)C(=O)C=C(O)c1ccccc1O', 'CC(C)[C@@H](OC(=O)CNC(=O)[C@H](C)O)C(=O)NCC=O', 'NC1CC(N)C(OC2OC(CO)C(O)C(N)C2O)C(O)C1O', 'Cn1nnnc1SCC1=C(C=O)N2C(=O)[C@@H](N)[C@H]2SC1', 'CON=CC(=O)N[C@@H]1C(=O)N2C(C=O)=C(CO)CS[C@H]12', 'CNC1C(O)C(OC2C(N)CC(N)C(O)C2O)OCC1(C)O', 'O=C/C(=C/O)C(=O)C(O)C(=O)C=C(O)c1ccccc1O', 'CC1(C)S[C@@H]2[C@H](NC(=O)CN)C(=O)N2[C@H]1C(=O)O', 'CO[C@@H](/C=C/O)[C@@H](C)[C@@H](OC(C)=O)[C@H](C)CO', 'NCC(=O)N[C@@H]1C(=O)N2C(C(=O)O)=C(CS)CS[C@H]12', 'CC(=O)N1CCN(C(C)=O)[C@@H](CN2CC[C@@H](O)C2)C1', 'CC1(C)S[C@@H]2[C@H](NC(=O)CO)C(=O)N2[C@H]1C(=O)O', 'C[C@H]([C@@H](O)[C@@H](C)CC1CO1)[C@H](O)[C@@H](C)C=O', 'CC1(C)S[C@@H]2[C@H](NC(=O)CN)C(=O)N2[C@H]1C(=O)[O-]', 'C[C@@H]1OCC[C@@H]2O[C@H]3CC(=O)CO[C@H]3O[C@H]12', 'CN(CCN1CC[C@@H](O)C1)C(=O)Cc1ccccc1N', 'CC(=O)N[C@@H]1C(=O)N2C(C(=O)O)=C(CS)CS[C@H]12', 'CC1=C(C(=O)O)N2C(=O)[C@@H](NC(=O)CN)[C@H]2SC1', 'COc1cccc2c1C(=O)c1c(O)ccc(O)c1C2=O', 'CC(=O)N[C@@H]1C(=O)N2[C@@H]1SC(C)(C)[C@@H]2C(=O)O', 'CC(=O)N[C@@H]1C(=O)N2C(C(=O)O)=C(CO)CS[C@H]12', 'Cc1nnc(SCC2=C(C(=O)O)N3C(=O)CC3SC2)s1', 'CC(=O)OCC1=C(C(=O)O)N2C(=O)[C@@H](N)[C@H]2SC1', 'C[C@@H](CNC(=O)Cc1csc(N)n1)NOCC(=O)O', 'C[C@@H](O)[C@H]1C(=O)N2C(C(=O)O)=C(S)[C@H](C)[C@H]12', 'CNC[C@H]1O[C@@]2(O)C(=O)CCO[C@H]2O[C@@H]1CO', 'CC(=O)N[C@@H]1C(=O)N2C(C(=O)O)=C(C)CS[C@H]12', 'CC1(C)S[C@@H]2[C@H](NC=O)C(=O)N2[C@H]1C(=O)O', 'NCCO[C@H]1[C@H](O)[C@@H](O)[C@H](N)C[C@@H]1N', 'NCC(=O)N[C@@H]1C(=O)N2C(C(=O)O)=CCS[C@H]12', 'CC(=O)N[C@@H]1C(=O)N2C(C=O)=C(CO)CS[C@H]12', 'CCCO[C@@H]1O[C@H](C)C[C@H](N(C)C)[C@H]1O', 'CC[C@@H](O)CC(O)[C@@H](O)CC(CO)OC(C)=O', 'CC(O)CCO[C@H]1C[C@H](N)[C@H](O)[C@H](C)O1', 'O=C(O)c1cn(CCF)c2c(F)cc(F)cc2c1=O', 'O=C1c2ccccc2C(=O)c2c(O)ccc(O)c21', 'O=C1c2cccc(O)c2C(=O)c2c(O)cccc21', 'CC(=O)N[C@@H]1C(=O)N2C(C(=O)O)=CCS[C@H]12', 'CC[C@@H](OC(=O)[C@H](C)[C@@H](O)CC)C(C)O', 'C[C@H](O)C(=O)NCC(=O)OCC(=O)NCC=O', 'CCn1cc(C(=O)O)c(=O)c2cc(F)cc(F)c21', 'CC(N)C(CO)OC1OC(CO)C(O)C(N)C1O', 'O=CC(C(=O)Oc1ccccc1)c1ccccc1', 'O=C1c2cccc(O)c2C(=O)c2cccc(O)c21', 'CC(=O)NC1C(=O)N2C(C(=O)O)=C(C)CS[C@H]12', 'CC1(C)SC2C(NC(=O)CN)C(=O)N2C1C(=O)O', 'CC1Oc2ccc3ccc4scnc4c3c2C1=O', 'O=C1c2ccccc2C(=O)c2c(O)cccc21', 'CCNC[C@H]1CN(C(C)=O)CCN1C(C)=O', 'CC1(C)S[C@@H]2[C@H](N)C(=O)N2[C@H]1C(=O)O', 'CC1Oc2cc(O)c3c(O)cccc3c2C1=O', 'CC(=O)NC1C(=O)N2C1SC(C)(C)C2C(=O)O', 'CC(=O)OCC1=C(C(=O)[O-])N[C@H](CN)SC1', 'CC1=C[C@@H](C=O)[C@]2(O)CCO[C@@H]2[C@@H]1O', 'CO[C@H]1CC(OCCO)O[C@@H](C)[C@@H]1O', 'COC1C(=O)N2C(C(=O)O)=C(CS)CO[C@H]12', 'C[C@@H](O)[C@H]1C(=O)N2C(C(=O)O)=CS[C@H]12', 'CC1(C)[C@H](C(=O)O)N2C(=O)C[C@H]2S1(=O)=O', 'COC1C(=O)N2[C@@H]1SC(C)(C)[C@@H]2C(=O)O', 'CC(=O)O[C@H]1CO[C@H](C)C[C@@H]1N(C)C', 'O=CC(O)C(=O)C=C(O)c1ccccc1O', 'O=CCNC(=O)COC(=O)CNC(=O)CO', 'N[C@@H]1C[C@H](N)[C@@H](O)[C@H](O)[C@H]1O', 'N[C@@H]1C(=O)N2C(C=O)=C(CO)CS[C@H]12', 'C[C@H]1OC[C@H](O)[C@@H](N(C)C)[C@@H]1O', 'CC1(C)[C@H](C(=O)O)N2C(=O)C[C@H]2S1=O', 'CCO[C@H]1C[C@H](N)[C@H](O)[C@H](C)O1', 'O=CNCC(=O)NC1CN(CC(=O)O)C1=O', 'CC(=O)NC1C(=O)N2C(C(=O)O)=CCCC12', 'CC[C@H](O)[C@@H](C)[C@H](O)[C@@H](C)C=O', 'C[C@@H]1OCC[C@@H]2O[C@@H](C)CO[C@H]12', 'O=C1CC[C@@H](C(=O)Oc2ccccc2)N1', 'NCC(=O)N[C@H]1CN(CC(=O)O)C1=O', 'CC1(C)S[C@@H]2CC(=O)N2[C@H]1C(=O)O', 'N[C@H]1[C@H](O)[C@@H](CO)OC[C@@H]1O', 'CCn1ccc(=O)c2cc(F)cc(F)c21', 'NC[C@H]1OC[C@H](O)[C@@H](O)[C@@H]1O', 'NC12C[C@H]3C[C@@H](C1)CC(C=O)(C3)C2', 'N[C@H]1[C@H](O)[C@@H](O)CO[C@@H]1CO', 'NCCOC1OC(CN)C(O)C(O)C1N', 'CC(O)CCOC1CC(N)C(O)C(C)O1', 'O=C(O)CN1C[C@H](NC(=O)CO)C1=O', 'OC[C@H]1OC[C@H](O)[C@@H](O)[C@@H]1O', 'C[C@H](N)CNC(=O)Cc1csc(N)n1', 'CC(=O)O[C@H]1[C@H](C)OCC[C@@]1(C)O', 'OC[C@H]1OC[C@@H](O)[C@@H](O)[C@@H]1O', 'NCCN[C@H]1CN(CC(=O)O)C1=O', 'CC(=O)N[C@H]1CN(CC(=O)O)C1=O', 'C[C@@H]1C[C@H](N(C)C)[C@@H](O)CO1', 'NCC(=O)NC1CN(CC(=O)O)C1=O', 'CN1CC(=O)c2ccccc2S1(=O)=O', 'C[C@@H](O)[C@@H]1CN(CC(=O)O)C1=O', 'C[C@@H]1OC[C@H](O)[C@H](O)[C@H]1O', 'CC(O)[C@@H](O)CC(CO)OC(C)=O', 'CC[C@H]1OC(CCO)CC[C@@H]1C', 'CC(O)CCOC1CC(N)CC(C)O1', 'C[C@H]1C(S)=C(C(=O)O)N2C(=O)CC12', 'CC1Oc2cc(O)cc(C=O)c2C1=O', 'C[C@@H]1OCC[C@H](N(C)C)[C@@H]1O', 'O[C@@H]1[C@@H](O)[C@H](O)OC[C@H]1O', 'CC(=O)N(C)CCN1CC[C@@H](O)C1', 'CC[C@@H](OC(C)=O)[C@H](C)CO', 'CO[C@]1(C)CCO[C@@H](C)[C@@H]1O', 'CC(=O)NC1CN(CC(=O)O)C1=O', 'CO[C@H]1CCO[C@@H](C)[C@@H]1O', 'CC1(C)SC2CC(=O)N2C1C(=O)O', 'O=c1ccnc2c(F)cc(F)cc12', 'C[C@@H]1NC(=O)[C@H]1NC(=O)C=N', 'N=CC(=O)N[C@@H]1C(=O)NC1CO', 'Cc1cc(-c2ccccc2Cl)no1', 'O=C(O)C1=C(S)C[C@@H]2CC(=O)N12', 'CCOC1CCC(N(C)C)C(C)O1', 'OC[C@H]1OCC[C@@H](O)[C@@H]1O', 'CC1(C)NC(=O)[C@H]1NC(=O)C=N', 'O=C1CCO[C@@H](OCCO)C1O', 'O=CC=C(O)c1ccccc1O', 'CC(=O)N1CCN(C(C)=O)CC1', 'CC1Oc2cc(O)ccc2C1=O', 'C[C@@H]1OCC[C@H](N)[C@@H]1O', 'O=c1ccnc2ccc(F)cc12', 'OC[C@H]1OC[C@@H](O)[C@@H]1O', 'O=CCC(=O)Oc1ccccc1', 'c1ccc(C2=NCCCN2)cc1', 'CC[C@@H](O)[C@H]1OCCC1O', 'CC(C)[C@H]1OCCC[C@@H]1C', 'CCC[C@H](C)C[C@@](C)(O)CO', 'C[C@H]1OCC[C@@](C)(O)[C@@H]1O', 'O=c1ccoc2cc(O)ccc12', 'CC1OCC(O)C(N(C)C)C1O', '[N-]=[N+]=N[C@H]1CCO[C@@H]1CO', 'N[C@H]1CN(CC(=O)O)C1=O', 'CC(=O)NCCNCC(=O)O', 'NC1C(O)COC(CO)C1O', 'CC1CC(N(C)C)C(O)CO1', 'NC1CC(N)C(O)C(O)C1O', 'Cn1nnnc1SCCCS', 'C/C=C/[C@H](C)[C@H](O)CC', 'COC1(C)CCOC(C)C1O', 'COC1CN(CC(=O)O)C1=O', 'NCC1OCC(O)C(O)C1O', 'CCC(=O)Oc1ccccc1', 'CCOC(C)OCCC(C)O', 'O=c1ccnc2ccccc12', 'C[C@@H]1CC(N)C[C@H](C)C1', 'c1c[nH]c2cccnc2c1', 'NCCOCC(N)C(O)CO', 'Cc1nnc(SCCCS)s1', 'OC1[C@@H](O)COC[C@@H]1O', 'CO[C@H]1CCO[C@@H](C)C1', 'C[C@H]1CN[C@@H](CO)OC1', 'COC1C(O)COC(C)C1O', 'CNC1C(O)COCC1(C)O', 'CSC1OCC(O)C(O)C1O', 'CC(C)SCCNC(=O)CN', 'NC(=O)CN1CC(O)CC1=O', 'C[C@@H]1C[C@@H](O)CC(=O)O1', 'CC(O)CCCCN(C)C', 'CC[C@H](O)[C@@H](C)C=O', 'N[C@H]1CN(CC=O)C1=O', 'NCC1=CC[C@@H](N)CO1', 'COc1ccccc1C=O', 'O=C(O)c1ccccc1O', 'c1ccc2[nH]ccc2c1', 'NC1CN(CC(=O)[O-])C1=O', 'O[C@@H]1COCC[C@@H]1O', 'cccc1cccc[nH]1', 'CCC[C@@H]1CCN(C)C1', 'CC(=O)OC(CO)CCO', 'c1ccc2nccnc2c1', 'cccc1cC(=O)C(C)O1', 'C[C@H]1C[C@@H](O)CCO1', 'CC1OCCC(C)(O)C1O', 'O[C@@H]1COC[C@@H](O)C1', '[nH]c1ccc(Cl)c(Cl)c1', 'Cc1cnc(=O)[nH]c1=O', 'O=C(O)CN1CCC1=O', 'O=Cc1cccc(O)c1', 'CC(=O)N1CCNCC1', 'O=Cc1ccccc1O', 'O=S(=O)c1ccccc1', 'C[C@@H](N)[C@H](O)CO', 'CC1OCCC(O)C1O', 'OC1COCC(O)C1O', 'OCNc1ccccn1', 'CC1OCCC(N)C1O', 'NCC1CCC(N)CO1', 'CCOC[C@H](O)CC', 'COCCOCCCS', 'CC(=O)NC[C@H](C)N', 'CN1CCN(C=N)CC1', 'CCCC1CCN(C)C1', '[N-]=[N+]=N[C@H]1CCOC1', 'CCN1CC[C@@H](O)C1', 'O=Cc1ccccc1', 'O=CCNC(=O)CO', 'Oc1ccccc1O', 'CCOC(C)OCC', 'Clc1ccccc1Cl', 'OC[C@@H]1CCCN1', 'CCC[C@@](C)(O)CO', 'NCc1ccccc1', 'CC[C@@H](O)C(C)O', 'CN1CCCCCC1', 'N=CC(=O)NCC=O', 'COc1ccccc1', 'C[C@H]1CNCCN1', 'NCC[C@H](O)C=O', 'CC1OCCCC1=O', 'CC[C@@H](N)C(=O)O', 'NCCNCC(=O)[O-]', 'COC(=O)C(C)(C)C', 'N[C@@H]1CCCOC1', 'O=c1ccncc1Cl', 'Cc1oc(=O)oc1C', 'CC(=O)OCCCS', 'CC1OCC(O)C1O', 'CCOCOCCO', 'CCC(O)C(C)CO', 'ccc1scnc1c', 'CC(=O)NCC(N)=O', '[N+]=N[C@H]1CCOC1', 'Oc1ccccc1', 'O=CNCC(=O)O', 'CC(=O)NCCN', 'CCCCN(C)C', 'Clc1ccccc1', 'OCCOCCO', 'CCCOC(C)=O', 'NCCOCCN', 'CCNC(=O)CN', 'CN1CCNCC1', 'NCCNCC=O', 'CC(N)C(O)CO', 'COC(C)CCO', 'Fc1ccccc1', 'Cc1ccccc1', 'CC(=O)NCC=O', 'O=c1ccncc1', 'NCCOCCO', 'CCOCCCO', 'C[C@@H](C=O)CO', 'CC[C@@H](O)CC', 'NC(=O)CC(=O)O', 'CCOC(=O)CC', 'CC(=O)OCCO', 'N[C@H]1CCOC1', 'CC1CNCCN1', 'CCNC(=O)CC', 'CO[C@@H](C)CO', 'O=Cc1ccco1', 'NC(N)=NCCO', 'C[C@H]1CCCO1', 'NC1CCCOC1', 'O=CNCC(=O)[O-]', 'O=C1C[C@@H](S)N1', 'Nc1ccccc1', 'c1ccccc1', 'CCNCCN', 'Nc1nccs1', 'c1ccncc1', 'CC(O)CCO', 'CCOCCO', 'Cn1cnnn1', 'CN(C)CCO', 'CCCC(C)C', 'COC/C=C/O', 'cccc[nH]', 'CCNC(C)=O', 'CC[C@H](C)O', 'C1CNCCN1', 'Cc1nncs1', 'C1=CCC=CC1', 'OCC(O)CO', 'CCCCCO', 'COCC(C)O', 'O=CCNC=O', 'C[C@@H](O)CO', 'CC(O)CCN', 'c1cn[nH]n1', 'Cc1cscn1', 'c1nc[nH]n1', 'Cc1ccno1', 'CCOC(C)=O', 'cc(O)ccO', 'CC(C)CCO', 'CC(C)(O)C=O', 'C/C=C/CCC', 'C1CCOCC1', 'CC1N=CCN1', 'CN1CCSC1', 'Cccnc=O', 'NCC(=O)O', 'c1cscn1', 'O=CC=CO', 'CCN(C)C', 'COCCO', 'CNCCO', 'O=C1CCN1', 'CCOCC', 'SCCCS', 'c1nnnn1', 'CC(O)C=O', 'CC(O)CO', 'c1ccoc1', 'c1nncs1', 'c1ccsc1', 'ccccO', 'CCNCC', 'CCC(=O)O', 'C/C=C/CC', 'CCC(N)=O', 'O=C(O)CO', 'OCCCS', 'CNCC=O', 'NC(=O)CO', 'ccccc', 'nccc=O', 'COC(C)=O', 'CCCCC', 'CNC(C)=O', 'c1cnoc1', 'FC(F)(F)S', 'CC(N)C=O', 'ccc(c)C', 'CC(Cl)CN', 'CCNC=N', 'O=ccco', 'CC=CCC', 'C1CCCC1', 'c1cnnn1', 'cccc', 'NCCO', 'CCCO', 'CCNC', 'OCCO', 'CCCS', 'CC(=O)O', 'CC(C)S', 'O=CCO', 'CCC=O', 'CCOC', 'NCC=O', 'CC(N)=O', 'CCCC', 'CC(C)C', 'CC(C)O', 'CC1CO1', 'CCCN', 'O=S(=O)O', 'CC(C)N', 'FC(F)S', 'COC=O', 'NS(=O)=O', 'C/C=C/C', '[nH]c=O', 'O=[NH+][O-]', 'O=S(=O)[O-]', 'nccn', 'O=c(o)o', 'CccC', 'cn[nH]', 'cc(C)o', 'O=cc=O', 'CC=NN', 'FC(F)F', 'CCO', 'CCN', 'CCC', 'CC=O', 'ncs', 'CON', 'O=S=O', 'NC=O', 'O=CO', 'nnn', 'ccC', 'cc=O', 'ccn', 'CCS', 'FCS', 'NCN', 'NCO', 'COC', 'O=[N+][O-]', 'nc=O', 'FCF', '[NH3+][O-]', 'O=co', 'C=CC', 'CC=N', 'CS=O', 'CC', 'cc', 'C=O', 'CO', 'cn', 'O=S', 'nn', 'CN', 'CS', 'co', 'c=O', 'CF', '[N+][O-]', 'NO', 'H', 'B', 'C', 'N', 'O', 'F', 'Na', 'P', 'S', 'Cl', 'Ca', 'Br', 'I']
@@ -389,7 +411,9 @@ def main():
     os.makedirs('cache', exist_ok=True)
     vocab_str = str(sorted(vocab[0])) + str(sorted(vocab[1]))
     vocab_hash = hashlib.md5(vocab_str.encode()).hexdigest()[:8]
-    cache_train = f'cache/graph_train_data_{args.dataset.lower()}_{vocab_hash}.pkl'
+    cache_train = f'cache/graph_train_data_{args.dataset.lower()}_{vocab_hash}_{args.threshold}.pkl' \
+        if args.threshold != 0 \
+            else f'cache/graph_train_data_{args.dataset.lower()}_{vocab_hash}.pkl'
 
 
     # 检查缓存是否存在
@@ -405,6 +429,7 @@ def main():
         if 'max_subgraph_nodes' in cache_data:
             args.max_subgraph_nodes = cache_data['max_subgraph_nodes']
             print(f"  Restored max_subgraph_nodes: {args.max_subgraph_nodes}")
+
 
         print(f"  Loaded {len(train_dataset_with_masks)} graphs from cache")
     else:
@@ -523,17 +548,77 @@ def main():
         gnn=gnn,
         data_loader=val_loader_masked,
     )
-
+    print("\nEvaluation Results on Validation Set:")
     print(
-        "  Validity: {:.4f} (successful: {}/total: {})".format(
+        "  Validity ↑: {:.4f} (successful: {}/total: {})".format(
             evaluation_metrics["validity"],
             int(evaluation_metrics["successful"]),
             int(evaluation_metrics["total"]),
         )
     )
     print(
-        "  Proximity: {:.4f}".format(
+        "  Proximity ↓: {:.4f}".format(
             evaluation_metrics["proximity"]
+        )
+    )
+    print(
+        "  Fidelity+ ↑: {:.4f}".format(
+            evaluation_metrics["fidelity+"]
+        )
+    )
+    print(
+        "  Fidelity- ↓: {:.4f}".format(
+            evaluation_metrics["fidelity-"]
+        )
+    )
+    print(
+        "  Fidelity_prob ↑: {:.4f}".format(
+            evaluation_metrics["fidelity"]
+        )
+    )
+    print(
+        "  Sparsity ↑: {:.4f}".format(
+            evaluation_metrics["sparsity"]
+        )
+    )
+
+    evaluation_metrics = evaluate(
+        args=args,
+        model=trained_model,
+        gnn=gnn,
+        data_loader=train_loader_masked,
+    )
+    print("\nEvaluation Results on Training Set:")
+    print(
+        "  Validity ↑: {:.4f} (successful: {}/total: {})".format(
+            evaluation_metrics["validity"],
+            int(evaluation_metrics["successful"]),
+            int(evaluation_metrics["total"]),
+        )
+    )
+    print(
+        "  Proximity ↓: {:.4f}".format(
+            evaluation_metrics["proximity"]
+        )
+    )
+    print(
+        "  Fidelity+ ↑: {:.4f}".format(
+            evaluation_metrics["fidelity+"]
+        )
+    )
+    print(
+        "  Fidelity- ↓: {:.4f}".format(
+            evaluation_metrics["fidelity-"]
+        )
+    )
+    print(
+        "  Fidelity_prob ↑: {:.4f}".format(
+            evaluation_metrics["fidelity"]
+        )
+    )
+    print(
+        "  Sparsity ↑: {:.4f}".format(
+            evaluation_metrics["sparsity"]
         )
     )
 

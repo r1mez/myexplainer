@@ -869,20 +869,40 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader,
             with open(log_file, 'a') as f:
                 f.write(f"  Checkpoint saved: {checkpoint_path}\n\n")
 
-        evaluation_metrics = evaluate(args, model, gnn, eval_loader)
+            evaluation_metrics = evaluate(args, model, gnn, eval_loader)
 
-        print(
-            "  Validity: {:.4f} (successful: {}/total: {})".format(
-                evaluation_metrics["validity"],
-                int(evaluation_metrics["successful"]),
-                int(evaluation_metrics["total"]),
+            print(
+                "  Validity ↑: {:.4f} (successful: {}/total: {})".format(
+                    evaluation_metrics["validity"],
+                    int(evaluation_metrics["successful"]),
+                    int(evaluation_metrics["total"]),
+                )
             )
-        )
-        print(
-            "  Proximity: {:.4f}".format(
-                evaluation_metrics["proximity"]
+            print(
+                "  Proximity ↓: {:.4f}".format(
+                    evaluation_metrics["proximity"]
+                )
             )
-        )
+            print(
+                "  Fidelity+ ↑: {:.4f}".format(
+                    evaluation_metrics["fidelity+"]
+                )
+            )
+            print(
+                "  Fidelity- ↓: {:.4f}".format(
+                    evaluation_metrics["fidelity-"]
+                )
+            )
+            print(
+                "  Fidelity_prob ↑: {:.4f}".format(
+                    evaluation_metrics["fidelity"]
+                )
+            )
+            print(
+                "  Sparsity ↑: {:.4f}".format(
+                    evaluation_metrics["sparsity"]
+                )
+            )
 
     # 训练结束
     end_time = datetime.now()

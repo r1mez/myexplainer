@@ -116,10 +116,10 @@ class Mutagenicity(InMemoryDataset):
         # assert len(data_list) == 4247
 
         random.shuffle(data_list)
-        torch.save(self.collate(data_list[int(len(data_list)*0.4):]), self.processed_paths[0])
-        torch.save(self.collate(data_list[int(len(data_list)*0.2):int(len(data_list)*0.4)]), self.processed_paths[1])
-        torch.save(self.collate(data_list[:int(len(data_list)*0.2)]), self.processed_paths[2])
+        # torch.save(self.collate(data_list[int(len(data_list)*0.4):]), self.processed_paths[0])
+        # torch.save(self.collate(data_list[int(len(data_list)*0.2):int(len(data_list)*0.4)]), self.processed_paths[1])
+        # torch.save(self.collate(data_list[:int(len(data_list)*0.2)]), self.processed_paths[2])
 
-        # torch.save(self.collate(data_list[1000:]), self.processed_paths[0])
-        # torch.save(self.collate(data_list[500:1000]), self.processed_paths[1])
-        # torch.save(self.collate(data_list[:500]), self.processed_paths[2])
+        torch.save(self.collate(data_list[1000:]), self.processed_paths[0])
+        torch.save(self.collate(data_list[500:1000]), self.processed_paths[1])
+        torch.save(self.collate(data_list[:500]), self.processed_paths[2])

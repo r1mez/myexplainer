@@ -6,6 +6,7 @@ import os
 
 import networkx as nx
 
+from evaluation import evaluate
 
 sys.path.append("..")
 
@@ -22,7 +23,7 @@ from utils import get_datasets, GraphPairData, custom_collate_fn, GraphTrainData
 from models.myexplainer import MyExplainer
 from gnns import Mutag_GCN
 from utils.vis_utils import visualize_subgraph
-from utils.graph_utils import data_to_mol, MUTAG_atom_map
+from utils.graph_utils import data_to_mol, MUTAG_atom_map, extract_explanatory_subgraph, exclude_explanatory_subgraph
 from rdkit.Chem.Draw import MolToImage
 from rdkit import Chem
 
@@ -38,7 +39,7 @@ def parse_args():
     parser.add_argument("--model_path", type=str, default="param/myexplainer_subgraph_best.pt", help="Path to trained model.")
     parser.add_argument("--gnn_path", type=str, default="param/", help="GNN directory.")
     parser.add_argument("--top_k", type=int, default=1, help="Number of top similar graphs for pairing.")
-    parser.add_argument("--threshold", type=float, default=0.9, help="Threshold for data extraction.")
+    parser.add_argument("--threshold", type=float, default=0, help="Threshold for data extraction.")
     parser.add_argument("--output_dir", type=str, default="test_results", help="Directory to save visualization results.")
     parser.add_argument("--num_samples", type=int, default=10, help="Number of test samples to visualize.")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for testing.")
@@ -51,8 +52,10 @@ def parse_args():
     parser.add_argument("--u_dim", type=int, default=32, help="U dimension.")
     parser.add_argument("--edge_attr_dim", type=int, default=3, help="Edge attribute dimension.")
     parser.add_argument("--max_num_nodes", type=int, default=20, help="Maximum number of nodes.")
-    parser.add_argument("--max_subgraph_nodes", type=int, default=20, help="Maximum number of subgraph nodes.")
+    parser.add_argument("--max_subgraph_nodes", type=int, default=20, help="Maximum number of subgraph nodes.")     # 53, 20
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate.")
+
+    parser.add_argument("--visualize", type=bool, default=True, help="Whether to visualize counterfactuals.")
 
     return parser.parse_args()
 
@@ -112,53 +115,6 @@ def dense_to_sparse_graph(x_dense, adj_dense, mask, threshold=0.5, device='cpu')
         graphs.append(data)
 
     return graphs
-
-
-def visualize_graph_pair(ori_data, gen_data, save_path, title=""):
-    """
-    Visualize original and generated molecular graphs side by side
-
-    Args:
-        ori_data: Original PyG Data object
-        gen_data: Generated PyG Data object
-        save_path: Path to save the visualization
-        title: Title for the plot
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-    # Visualize original graph
-    try:
-        ori_mol, _, _ = data_to_mol(ori_data)
-        ori_img = MolToImage(ori_mol, size=(400, 400))
-        axes[0].imshow(ori_img)
-        axes[0].set_title(f"Original Graph\nPred: {ori_data.y.item() if hasattr(ori_data, 'y') else 'N/A'}")
-        axes[0].axis('off')
-    except Exception as e:
-        axes[0].text(0.5, 0.5, f"Error rendering\noriginal graph:\n{str(e)}",
-                    ha='center', va='center', fontsize=10)
-        axes[0].axis('off')
-
-    # Visualize generated graph
-    try:
-        gen_mol, _, _ = data_to_mol(gen_data)
-        gen_img = MolToImage(gen_mol, size=(400, 400))
-        axes[1].imshow(gen_img)
-        axes[1].set_title(f"Generated Counterfactual\nTarget: {gen_data.y.item() if hasattr(gen_data, 'y') else 'N/A'}")
-        axes[1].axis('off')
-    except Exception as e:
-        axes[1].text(0.5, 0.5, f"Error rendering\ngenerated graph:\n{str(e)}",
-                    ha='center', va='center', fontsize=10)
-        axes[1].axis('off')
-
-    if title:
-        fig.suptitle(title, fontsize=14, fontweight='bold')
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close()
-
-    print(f"Saved visualization to {save_path}")
-
 
 def generate_counterfactuals(args, model, gnn, test_loader):
     """
@@ -284,80 +240,12 @@ def generate_counterfactuals(args, model, gnn, test_loader):
     print(f"1->0 Flip Success Rate: {success_rate_1_to_0:.2f}% ({successful_1_to_0}/{total_1_samples})")
 
 
+
+
     return results
 
 
-# def visualize_counterfactuals(results, test_dataset, save_dir=None, max_samples=20, figsize=(12, 5), layout='planar'):
-#     """
-#         Visualize counterfactual explanations from generate_counterfactuals output.
-#
-#         For each result, plot the original graph and the generated counterfactual graph side-by-side,
-#         with labels indicating predictions.
-#
-#         Args:
-#             results: List of dictionaries from generate_counterfactuals.
-#             save_dir: Directory to save visualization images (default: None, displays instead of saving).
-#             max_samples: Maximum number of samples to visualize (default: 10, for efficiency).
-#             figsize: Figure size for each subplot (default: (12, 5)).
-#
-#         Returns:
-#             None: Saves or displays plots.
-#         """
-#     if save_dir is not None:
-#         os.makedirs(save_dir, exist_ok=True)
-#
-#     num_samples = min(max_samples, len(results))
-#
-#     for i in range(num_samples):
-#         result = results[i]
-#         ori_graph = result['ori_graph']
-#         gen_graph = result['gen_graph']
-#         ori_pred = result['ori_pred']
-#         cf_pred = result['cf_pred']
-#         gen_gnn_pred = result['gen_gnn_pred']
-#
-#         # Get the corresponding subgraph and node mappings for highlighting
-#         subgraph = test_dataset[i]['subgraph']
-#         node_mappings = subgraph['node_mappings']  # List of original graph node indices
-#         highlight_nodes = node_mappings  # Set for O(1) lookup
-#
-#         # Convert PyTorch Geometric Data to NetworkX graphs
-#         G_ori = to_networkx(ori_graph, to_undirected=True)
-#         G_gen = to_networkx(gen_graph, to_undirected=True)
-#
-#         # Compute positions using original graph layout (reuse for both)
-#         pos = nx.spring_layout(G_ori)
-#
-#         # Create figure with two subplots
-#         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
-#
-#         # Plot original graph with highlighted nodes
-#         node_colors_ori = ['red' if node in highlight_nodes else 'lightblue' for node in G_ori.nodes()]
-#         nx.draw(G_ori, pos, ax=ax1, with_labels=True, node_color=node_colors_ori,
-#                 node_size=100, font_size=10, font_weight='bold', edge_color='gray')
-#         ax1.set_title(f'Original Graph\nPred: {ori_pred} (Target CF: {cf_pred})')
-#
-#         # Plot generated graph with highlighted nodes, using same positions
-#         node_colors_gen = ['orange' if node in highlight_nodes else 'lightgreen' for node in G_gen.nodes()]
-#         nx.draw(G_gen, pos, ax=ax2, with_labels=True, node_color=node_colors_gen,
-#                 node_size=100, font_size=10, font_weight='bold', edge_color='gray')
-#         ax2.set_title(f'Counterfactual Graph\nGNN Pred: {gen_gnn_pred}')
-#
-#         plt.tight_layout()
-#
-#         if save_dir:
-#             plt.savefig(os.path.join(save_dir, f'cf_sample_{i}.png'), dpi=300, bbox_inches='tight')
-#         else:
-#             plt.show()
-#
-#         plt.close(fig)
-#
-#     if save_dir:
-#         print(f"Visualizations saved to {save_dir}")
-#     else:
-#         print(f"Displayed visualizations for {num_samples} samples.")
-
-def visualize_counterfactuals(results, test_dataset, save_dir=None, max_samples=20, figsize=(12, 5), layout='planar'):
+def visualize_counterfactuals(args, results, test_dataset, gnn, save_dir=None, max_samples=20, figsize=(12, 10)):
     """
         Visualize counterfactual explanations from generate_counterfactuals output.
 
@@ -377,7 +265,7 @@ def visualize_counterfactuals(results, test_dataset, save_dir=None, max_samples=
         """
     # Atom mapping for one-hot encoded node features
     atom_map = {0: 'C', 1: 'O', 2: 'Cl', 3: 'H', 4: 'N', 5: 'F', 6: 'Br', 7: 'S', 8: 'P', 9: 'I', 10: 'Na', 11: 'K', 12: 'Li', 13: 'Ca'}
-
+    device = args.device
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
 
@@ -387,6 +275,14 @@ def visualize_counterfactuals(results, test_dataset, save_dir=None, max_samples=
         result = results[i]
         ori_graph = result['ori_graph']
         gen_graph = result['gen_graph']
+
+        exp_graph = extract_explanatory_subgraph(ori_graph, gen_graph)
+        exp_excluded_graph = exclude_explanatory_subgraph(ori_graph, gen_graph)
+        exp_graph_batch = Batch.from_data_list([exp_graph]).to(device)
+        exp_excluded_graph_batch = Batch.from_data_list([exp_excluded_graph]).to(device)
+        exp_pred = gnn.get_pred(exp_graph_batch.x, exp_graph_batch.edge_index, exp_graph_batch.batch)[0].argmax(dim=1).item()
+        exp_excluded_pred = gnn.get_pred(exp_excluded_graph_batch.x, exp_excluded_graph_batch.edge_index, exp_excluded_graph_batch.batch)[0].argmax(dim=1).item()
+
         ori_pred = result['ori_pred']
         cf_pred = result['cf_pred']
         gen_gnn_pred = result['gen_gnn_pred']
@@ -399,6 +295,8 @@ def visualize_counterfactuals(results, test_dataset, save_dir=None, max_samples=
         # Convert PyTorch Geometric Data to NetworkX graphs
         G_ori = to_networkx(ori_graph, to_undirected=True)
         G_gen = to_networkx(gen_graph, to_undirected=True)
+        G_exp = to_networkx(exp_graph, to_undirected=True)
+        G_exp_excluded = to_networkx(exp_excluded_graph, to_undirected=True)
 
         # Extract atom names for node labels from one-hot features
         def get_atom_labels(graph_data, atom_map):
@@ -413,6 +311,8 @@ def visualize_counterfactuals(results, test_dataset, save_dir=None, max_samples=
 
         ori_labels = get_atom_labels(ori_graph, atom_map)
         gen_labels = get_atom_labels(gen_graph, atom_map)
+        exp_labels = get_atom_labels(exp_graph, atom_map)
+        exp_excluded_labels = get_atom_labels(exp_excluded_graph, atom_map)
 
         # Compute positions using original graph layout (reuse for both)
         pos = nx.spring_layout(G_ori)
@@ -427,7 +327,8 @@ def visualize_counterfactuals(results, test_dataset, save_dir=None, max_samples=
 
 
         # Create figure with two subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+        fig, axes = plt.subplots(2, 2, figsize=figsize)
+        ax1, ax2, ax3, ax4 = axes.flatten()
 
         # Plot original graph with highlighted nodes and atom labels
         node_colors_ori = ['red' if node in highlight_nodes else 'lightblue' for node in G_ori.nodes()]
@@ -448,6 +349,17 @@ def visualize_counterfactuals(results, test_dataset, save_dir=None, max_samples=
                 node_size=100, font_size=10, font_weight='bold', edge_color='gray')
         ax2.set_title(f'Counterfactual Graph\nGNN Pred: {gen_gnn_pred}')
 
+
+        node_colors_exp = ['yellow' if node in highlight_nodes else 'gray' for node in G_exp.nodes()]
+        nx.draw(G_exp, pos, ax=ax3, labels=exp_labels, with_labels=True, node_color=node_colors_exp,
+                node_size=100, font_size=10, font_weight='bold', edge_color='gray')
+        ax3.set_title(f'Explanatory Subgraph\nGNN Pred: {exp_pred}')
+
+        node_colors_exp_excluded = ['magenta' if node in highlight_nodes else 'pink' for node in G_exp_excluded.nodes()]
+        nx.draw(G_exp_excluded, pos, ax=ax4, labels=exp_excluded_labels, with_labels=True, node_color=node_colors_exp_excluded,
+                node_size=100, font_size=10, font_weight='bold', edge_color='gray')
+        ax4.set_title(f'Explanatory Subgraph Excluded\nGNN Pred: {exp_excluded_pred}')
+
         plt.tight_layout()
 
         if save_dir:
@@ -463,123 +375,6 @@ def visualize_counterfactuals(results, test_dataset, save_dir=None, max_samples=
         print(f"Displayed visualizations for {num_samples} samples.")
 
 def main():
-    args = parse_args()
-    args.device = torch.device(f'cuda:{args.cuda}' if torch.cuda.is_available() else 'cpu')
-
-    print(f"Using device: {args.device}")
-    print(f"Loading dataset: {args.dataset}")
-
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    # Load datasets
-    train_dataset, val_dataset, test_dataset = get_datasets(name=args.dataset.lower())
-
-    print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
-
-    # Detect actual max_num_nodes from dataset (IMPORTANT: must match training!)
-    print("\nDetecting actual max_num_nodes from dataset...")
-    all_datasets = list(train_dataset) + list(val_dataset) + list(test_dataset)
-    actual_max_nodes = max([data.num_nodes for data in all_datasets])
-    print(f"  Actual max nodes in dataset: {actual_max_nodes}")
-
-    # Update max_num_nodes to match what was used during training
-    if args.max_num_nodes < actual_max_nodes:
-        print(f"  WARNING: Configured max_num_nodes ({args.max_num_nodes}) < actual max ({actual_max_nodes})")
-        args.max_num_nodes = actual_max_nodes + 2  # Add small margin, same as training
-        print(f"  Updated max_num_nodes to: {args.max_num_nodes}")
-    else:
-        print(f"  Using max_num_nodes: {args.max_num_nodes}")
-
-    # Load GNN
-    print(f"\nLoading GNN from {args.gnn_path}gnns/{args.dataset.lower()}_gcn.pt")
-    gnn = torch.load(f'{args.gnn_path}gnns/{args.dataset.lower()}_gcn.pt', map_location=args.device)
-    gnn.eval()
-
-    # Initialize MyExplainer model
-    print("\nInitializing MyExplainer model...")
-    print(f"  Model config: x_dim={args.x_dim}, h_dim={args.h_dim}, z_dim={args.z_dim}, max_num_nodes={args.max_num_nodes}")
-    model = MyExplainer(args, gnn).to(args.device)
-
-    # Load trained model
-    print(f"\nLoading trained model from {args.model_path}")
-    if os.path.exists(args.model_path):
-        model.load_state_dict(torch.load(args.model_path, map_location=args.device))
-        print("Model loaded successfully!")
-    else:
-        raise FileNotFoundError(f"Model file not found: {args.model_path}")
-
-    # Create test DataLoader (不需要配对，直接使用原始测试集)
-    print("\nCreating test data loader...")
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
-    print(f"Test dataset size: {len(test_dataset)}")
-
-    # Generate counterfactuals
-    print("\nGenerating counterfactual explanations...")
-    print("(自动为每个测试样本生成反事实解释，将预测标签翻转)")
-    results = generate_counterfactuals(args, model, gnn, test_loader)
-
-    print(f"\nGenerated {len(results)} counterfactual explanations")
-
-    # Visualize samples
-    print(f"\nVisualizing {min(args.num_samples, len(results))} samples...")
-
-    # Calculate success rate
-    success_count = 0
-    total_count = 0
-
-    for idx, result in enumerate(results[:args.num_samples]):
-        ori_graph = result['ori_graph']
-        gen_graph = result['gen_graph']
-
-        title = f"Sample {idx+1}\n" \
-                f"Original Pred: {result['ori_pred']} (GNN: {result['ori_gnn_pred']}) | " \
-                f"Counterfactual Target: {result['cf_pred']} | Generated GNN Pred: {result['gen_gnn_pred']}"
-
-        save_path = os.path.join(args.output_dir, f"sample_{idx:03d}.png")
-        visualize_graph_pair(ori_graph, gen_graph, save_path, title)
-
-        # Check if counterfactual was successful
-        if result['gen_gnn_pred'] == result['cf_pred']:
-            success_count += 1
-        total_count += 1
-
-    # Calculate overall statistics
-    total_success = sum(1 for r in results if r['gen_gnn_pred'] == r['cf_pred'])
-    total_results = len(results)
-    success_rate = total_success / total_results if total_results > 0 else 0
-
-    print(f"\n{'='*60}")
-    print(f"Test Results Summary:")
-    print(f"{'='*60}")
-    print(f"Total test samples: {total_results}")
-    print(f"Successful counterfactuals: {total_success}")
-    print(f"Success rate: {success_rate*100:.2f}%")
-    print(f"Visualizations saved to: {args.output_dir}")
-    print(f"{'='*60}\n")
-
-    # Save detailed results
-    results_file = os.path.join(args.output_dir, "test_results.txt")
-    with open(results_file, 'w') as f:
-        f.write(f"Test Results for {args.dataset}\n")
-        f.write(f"{'='*60}\n")
-        f.write(f"Model: {args.model_path}\n")
-        f.write(f"Total samples: {total_results}\n")
-        f.write(f"Successful counterfactuals: {total_success}\n")
-        f.write(f"Success rate: {success_rate*100:.2f}%\n")
-        f.write(f"{'='*60}\n\n")
-
-        for idx, result in enumerate(results):
-            f.write(f"Sample {idx+1}:\n")
-            f.write(f"  Original prediction: {result['ori_pred']} (GNN: {result['ori_gnn_pred']})\n")
-            f.write(f"  Counterfactual target: {result['cf_pred']}\n")
-            f.write(f"  Generated GNN prediction: {result['gen_gnn_pred']}\n")
-            f.write(f"  Success: {result['gen_gnn_pred'] == result['cf_pred']}\n")
-            f.write("\n")
-
-    print(f"Detailed results saved to {results_file}")
-
-def main1():
     args = parse_args()
 
     # 设置设备为torch.device对象
@@ -798,30 +593,31 @@ def main1():
     #          'CN', 'cn', 'O=S', 'OP', 'C[N+]', '[N+]=O', 'CS', 'C=O', 'CCl', 'CBr', 'nn', 'N=N', 'SS', 'C[n+]', 'C#N',
     #          'co', 'cs', 'CF', 'C', 'O', 'Cl', 'H', 'N', 'F', 'Br', 'S', 'P', 'I']
 
-    smis_0= ['O=C1c2ccccc2C(=O)c2c(O)cccc21', 'O=C1c2ccccc2C(=O)c2ccccc21', 'c1ccc2c(c1)ccc1ccccc12',
-             'c1ccc2nc3ccccc3cc2c1', 'c1ccc2cc3ccccc3cc2c1', 'ccccccc1ccccc1', 'O=[N+]([O-])c1cccc([N+](=O)[O-])c1',
-             'c1ccc(c2ccccc2)cc1', 'Nc1ccc2ccccc2c1', 'cccccccc[N+](=O)[O-]', 'Nc1cccc2ccccc12', 'c1ccc2ccccc2c1',
-             'c1ccc2ncccc2c1', 'ccccc1ccccc1', 'Cc1ccccc1[N+](=O)[O-]', 'c1ccc2[nH]ccc2c1', 'Nc1ccc([N+](=O)[O-])cc1',
-             'Cc1ccc([N+](=O)[O-])cc1', 'c1ccc2occcc2c1', 'O=[N+]([O-])c1ccccc1', 'cccc1ccccc1',
-             'Cc1ccc([N+](=O)[O-])o1', 'cccccccc', 'ccc1ccccc1', 'O=Cc1ccccc1', 'Cc1ccccc1N', 'CCc1ccccc1',
-             'CNc1ccccc1', 'Cc1ccccc1', 'Nc1ccccc1', 'Oc1ccccc1', 'nc1ccccc1', 'cc1ccccc1', 'c1ccccc1', 'c1ccncc1',
-             'cccccc', 'CCOCCO', 'Cc1ccco1', 'c1cncnc1', 'CCNCCN', 'ccccC', 'O=[SH](=O)O', 'c1ccsc1', 'CC(O)CO',
-             'c1cncn1', 'CCNC=O', 'Cnc(n)N', 'CCNCC', 'ccccn', 'cccc', 'CCNC', 'CC1CO1', 'cccn', 'CC(N)=O', 'CC(=O)O',
-             'OCCO', 'CCCC', 'Cncn', 'CCOP', 'CCCO', 'ccnc', 'CC(C)O', 'cncn', 'CCO', 'O=[N+][O-]', 'CCN', 'ccn',
-             'CC=O', 'CCCl', 'CCC', 'C1CO1', 'CNC', 'O=S=O', 'ncn', 'NC=O', 'O=CO', 'ClCCl', 'cc', 'CC', '[N+][O-]',
-             'cn', 'CO', 'CN', 'O=S', 'CCl', 'N=O', 'NO', 'H', 'B', 'C', 'N', 'O', 'F', 'Na', 'P', 'S', 'Cl', 'Ca',
-             'Br', 'I']
-    smis_1= ['OCC1OCC(O)CC1O', 'c1ccc2[nH]ccc2c1', 'CC(=O)Nc1ccccc1', 'c1ccc2ccccc2c1', 'c1ccc2occcc2c1',
-             'c1ccc2ncccc2c1', 'O=C(O)c1ccccc1', 'FC(F)c1ccccc1', 'CC(=O)c1ccccc1', 'cccc1ccccc1', 'CCCCCC(C)CC',
-             'CCCCCCCC', 'O=Cc1ccccc1', 'COc1ccccc1', 'FCc1ccccc1', 'Clc1cccc(Cl)c1', 'ccc1ccccc1', 'Oc1ccccc1Br',
-             'Oc1ccc(Cl)cc1', 'Cc1ccc(O)cc1', 'Cc1ccccc1', 'Oc1ccccc1', 'Clc1ccccc1', 'Nc1ccccc1', 'Brc1ccccc1',
-             'CCCCC(=O)O', 'c1ccccc1', 'c1ccncc1', 'CCCC(=O)O', 'c1cncnc1', 'CC(O)CCO', 'CCCC(C)O', 'CCCC(C)C',
-             'C1CCCCC1', 'CCCCCC', 'CCC(O)CO', 'CCCCO', 'CCC(C)C', 'CCCC=O', 'CCCCC', 'O=[SH](=O)O', 'CCC(C)O',
-             'CCC(=O)O', 'ccccc', 'CCC(C)=O', 'CCNCC', 'N[SH](=O)=O', 'C=C(C)C=O', 'CC(O)CO', 'CCC(N)=O', 'cccc',
-             'CCCC', 'CCC=O', 'CC(=O)O', 'CC(C)C', 'cncn', 'CC(N)=O', 'CCCO', 'OCCO', 'CC(C)O', 'CCNC', 'CC=CC', 'NCCO',
-             'CCCCl', 'CC(C)N', 'CC(C)=O', 'CCC', 'CCO', 'CCN', 'O=CO', 'O=S=O', 'CC=O', 'NC=O', 'ccn', 'CNC', 'c[nH]',
-             'COP', 'ccc', 'nc=O', 'CC', 'cc', 'CO', 'CN', 'cn', 'O=S', 'OP', 'C[N+]', 'H', 'B', 'C', 'N', 'O', 'F',
-             'Na', 'P', 'S', 'Cl', 'Ca', 'Br', 'I']
+    smis_0 = ['O=C1c2ccccc2C(=O)c2c(O)cccc21', 'O=C1c2ccccc2C(=O)c2ccccc21', 'c1cc2ccc3cccc4ccc(c1)c2c34',
+              'c1ccc2nc3ccccc3cc2c1', 'c1ccc2c(c1)ccc1ccccc12', 'c1ccc2cc3ccccc3cc2c1', 'cccc1cccc2ccccc12',
+              'ccccccc1ccccc1', 'O=[N+]([O-])c1cccc([N+](=O)[O-])c1', 'c1ccc(c2ccccc2)cc1', 'Nc1ccc2ccccc2c1',
+              'Nc1cccc2ccccc12', 'c1ccc2ccccc2c1', 'c1ccc2ncccc2c1', 'ccccc1ccccc1', 'Cc1ccc([N+](=O)[O-])cc1',
+              'Cc1ccccc1[N+](=O)[O-]', 'Nc1ccc([N+](=O)[O-])cc1', 'c1ccc2occcc2c1', 'O=[N+]([O-])c1ccccc1',
+              'cccc1ccccc1', 'c1ccc(C2CO2)cc1', 'Cc1ccc([N+](=O)[O-])o1', 'cccccccc', 'ccc1ccccc1', 'O=Cc1ccccc1',
+              'CCc1ccccc1', 'Cc1ccccc1N', 'CNc1ccccc1', 'N=Nc1ccccc1', 'O=[N+]([O-])c1cccs1', 'Cc1ccccc1', 'Nc1ccccc1',
+              'Oc1ccccc1', 'cccc[N+](=O)[O-]', 'nc1ccccc1', 'c1ccccc1', 'c1ccncc1', 'Cc1ccco1', 'c1cncnc1', 'CCOCCO',
+              'ccccC', 'O=[SH](=O)O', 'c1cncn1', 'CC(O)CO', 'ccccn', 'CCNCC', 'CCNC=O', 'Cnc(n)N', 'cccc', 'CCNC',
+              'CC1CO1', 'CC(N)=O', 'cccn', 'OCCO', 'CC(=O)O', 'CCCC', 'CCCO', 'Cncn', 'cncn', 'CC(C)O', 'O=CCCl', 'CCO',
+              'O=[N+][O-]', 'CCN', 'CC=O', 'ccn', 'CCCl', 'O=S=O', 'CCC', 'CNC', 'NC=O', 'ncn', 'ccc', 'O=CO', 'ClCCl',
+              'C1CO1', 'cc', 'CC', '[N+][O-]', 'cn', 'CO', 'CN', 'O=S', 'CCl', 'N=O', 'NO', 'H', 'B', 'C', 'N', 'O',
+              'F',
+              'Na', 'P', 'S', 'Cl', 'Ca', 'Br', 'I']
+    smis_1 = ['CCCCCCCCCCCC', 'OCC1OCC(O)CC1O', 'c1ccc2[nH]ccc2c1', 'c1ccc2ncccc2c1', 'CC(=O)Nc1ccccc1',
+              'c1ccc2ccccc2c1', 'O=C(O)c1ccccc1', 'FC(F)c1ccccc1', 'CCCCCCCCC', 'CCCCCCCC', 'O=Cc1ccccc1',
+              'Clc1cccc(Cl)c1', 'ccc1ccccc1', 'FCc1ccccc1', 'COc1ccccc1', 'Cc1ccc(O)cc1', 'Oc1ccccc1Br', 'CCc1ccccc1',
+              'Cc1ccccc1', 'Clc1ccccc1', 'Oc1ccccc1', 'Nc1ccccc1', 'Brc1ccccc1', 'CCCCC(=O)O', 'c1ccccc1', 'c1ccncc1',
+              'CCCC(=O)O', 'c1cncnc1', 'CCOCCO', 'CC(O)CCO', 'CCCC(C)C', 'CCCC(C)O', 'CCC(O)CO', 'C=C(C)C(=O)O',
+              'C1CCCCC1', 'CCCCO', 'CCC(C)C', 'CCCC=O', 'CCCCC', 'O=[SH](=O)O', 'CCC(C)O', 'CCC(=O)O', 'CCNCC',
+              'CCC(C)=O', 'C=CC(=O)O', 'ccccc', 'COPOC', 'cccc', 'CCCC', 'CC(=O)O', 'cncn', 'CC(C)C', 'CC(C)O',
+              'CC(N)=O', 'CCCO', 'OCCO', 'CCNC', 'CCC=O', 'NCCO', 'CC=CC', 'CCCCl', 'ccc=O', 'CCO', 'CCC', 'CCN',
+              'O=CO','NC=O', 'O=S=O', 'CC=O', 'CNC', 'ccn', 'ccc', 'COP', 'c[nH]', 'CCF', 'O=[N+][O-]', 'CC', 'cc', 'CO', 'CN',
+              'cn', 'O=S', 'OP', 'C=O', 'CS', '[N+][O-]', 'C[N+]', 'H', 'B', 'C', 'N', 'O', 'F', 'Na', 'P', 'S', 'Cl',
+              'Ca', 'Br', 'I']
 
     # smis_0 = []
     # smis_1 = []
@@ -915,8 +711,51 @@ def main1():
     print("\nGenerating counterfactual explanations...")
     print("(自动为每个测试样本生成反事实解释，将预测标签翻转)")
     results = generate_counterfactuals(args, model, gnn, test_loader_masked)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    visualize_counterfactuals(results, test_dataset_with_masks, save_dir= os.path.join(args.output_dir, timestamp))
+
+
+    evaluation_metrics = evaluate(
+        args=args,
+        model=model,
+        gnn=gnn,
+        data_loader=test_loader_masked,
+    )
+    print("\nEvaluation Results on Testing Set:")
+    print(
+        "  Validity ↑: {:.4f} (successful: {}/total: {})".format(
+            evaluation_metrics["validity"],
+            int(evaluation_metrics["successful"]),
+            int(evaluation_metrics["total"]),
+        )
+    )
+    print(
+        "  Proximity ↓: {:.4f}".format(
+            evaluation_metrics["proximity"]
+        )
+    )
+    print(
+        "  Fidelity+ ↑: {:.4f}".format(
+            evaluation_metrics["fidelity+"]
+        )
+    )
+    print(
+        "  Fidelity- ↓: {:.4f}".format(
+            evaluation_metrics["fidelity-"]
+        )
+    )
+    print(
+        "  Fidelity_prob ↑: {:.4f}".format(
+            evaluation_metrics["fidelity"]
+        )
+    )
+    print(
+        "  Sparsity ↑: {:.4f}".format(
+            evaluation_metrics["sparsity"]
+        )
+    )
+    if args.visualize:
+        print("\nVisualizing counterfactual explanations...")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        visualize_counterfactuals(args, results, test_dataset_with_masks, gnn, save_dir= os.path.join(args.output_dir, timestamp))
 
 if __name__ == "__main__":
-    main1()
+    main()
