@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 from torch_geometric.data import Data
 import torch.nn.functional as F
 from torch_geometric.data import Batch
-from torch_geometric.utils import to_networkx
+from torch_geometric.utils import to_networkx, from_networkx
 from torch_geometric.utils import subgraph as pyg_subgraph
 
 from data.mutag.smiles import data_to_smiles
@@ -18,6 +18,7 @@ from utils.graph_utils import smarts_to_data
 from utils.subgraph_utils import generate_node_mappings, to_nx
 
 from tqdm import tqdm
+import igraph as ig
 
 class GraphPairData(Dataset):
     def __init__(self, args, dataloader, model, k=1):
@@ -204,230 +205,7 @@ class GraphPairData(Dataset):
         }
 
 
-# import multiprocessing as mp
-# from functools import partial
-# from torch_geometric.data import Data
-# import torch
-# import networkx as nx
-# from networkx.algorithms import isomorphism
-# import os
 
-
-# class GraphTrainData(Dataset):
-#     """
-#     用于训练的图数据集类
-#
-#     从dataloader中提取图数据，并为每个图找到对应类别的最大频繁子图掩码
-#     """
-#
-#     def __init__(self, args, dataloader, gnn, vocab):
-#         """
-#         初始化GraphTrainData数据集
-#
-#         Args:
-#             dataloader: PyG的DataLoader，用于加载图数据
-#             gnn: 训练好的GNN分类器，用于预测图的类别
-#             vocab: 频繁子图的SMILES字典
-#                    格式: {0: [smiles1, smiles2, ...], 1: [smiles3, smiles4, ...]}
-#                    key为类别标签，value为该类别的频繁子图SMILES列表
-#             device: 设备 (cpu or cuda)
-#         """
-#         self.gnn = gnn.eval()  # 设置为评估模式
-#         self.vocab = vocab
-#         self.device = args.device
-#         self.graphs = []  # 存储所有单个图
-#         self.subgraphs = []  # 存储所有图的频繁子图
-#         self.pred_labels = []  # 存储GNN预测的标签
-#         self.sub_masks = []  # 预计算的频繁子图掩码
-#
-#         # 预处理：从dataloader中提取所有图并进行预测
-#         print("  Processing graphs and computing subgraph masks...")
-#         self._process_graphs(dataloader)
-#         # Move all graphs to CPU to avoid sharing CUDA tensors in multiprocessing
-#         print("  Moving graphs to CPU...")
-#         for i in range(len(self.graphs)):
-#             self.graphs[i] = self._move_to_cpu(self.graphs[i])
-#         # 预计算所有频繁子图掩码
-#         print("  Precomputing subgraph masks...")
-#         self._precompute_masks()
-#         print(f"  Precomputation completed for {len(self.graphs)} graphs")
-#         print(f"  length of sub_masks: {len(self.sub_masks)}")
-#         print(f"  length of graphs: {len(self.graphs)}")
-#         print(f"  length of subgraphs: {len(self.subgraphs)}")
-#         # 向args添加子图集合中最大原子数
-#         args.max_subgraph_nodes = max([g.num_nodes for g in self.subgraphs]) + 3 if self.subgraphs else 0
-#         self.max_subgraph_nodes = args.max_subgraph_nodes
-#         print(f"  Max nodes in subgraphs: {args.max_subgraph_nodes}")
-#         print(f"Padding subgraph with {self.max_subgraph_nodes}")
-#         self.subgraphs = self._graph_padding(self.max_subgraph_nodes, self.subgraphs)
-#
-#     def _move_to_cpu(self, data):
-#         """Move PyG Data object to CPU"""
-#         data.x = data.x.cpu()
-#         data.edge_index = data.edge_index.cpu()
-#         if hasattr(data, 'edge_attr') and data.edge_attr is not None:
-#             data.edge_attr = data.edge_attr.cpu()
-#         if hasattr(data, 'y') and data.y is not None:
-#             data.y = data.y.cpu()
-#         # Remove batch if present, as it's single graph
-#         if hasattr(data, 'batch'):
-#             delattr(data, 'batch')
-#         return data
-#
-#     def _process_graphs(self, dataloader):
-#         """从dataloader中提取图并使用GNN进行预测"""
-#         with torch.no_grad():
-#             for data in dataloader:
-#                 x = data.x.to(self.device)
-#                 edge_index = data.edge_index.to(self.device)
-#                 batch_idx = data.batch.to(self.device)
-#                 edge_attr = data.edge_attr.to(self.device) if hasattr(data, 'edge_attr') else None
-#
-#                 # 使用GNN进行预测
-#                 pred_probs, _ = self.gnn.get_pred(x, edge_index, batch_idx)
-#
-#                 # 逐个处理batch中的图
-#                 num_graphs = data.num_graphs
-#                 for i in range(num_graphs):
-#                     # 提取单个图的数据
-#                     mask = (batch_idx == i)
-#                     node_x = x[mask]
-#
-#                     # 提取单个图的边
-#                     edge_mask = mask[edge_index[0]]
-#                     graph_edge_index = edge_index[:, edge_mask]
-#                     graph_edge_attr = edge_attr[edge_mask] if edge_attr is not None else None
-#
-#                     # 重新映射边索引为局部索引
-#                     unique_nodes = torch.unique(graph_edge_index)
-#                     node_mapping = {old.item(): new for new, old in enumerate(unique_nodes)}
-#                     graph_edge_index = torch.tensor(
-#                         [
-#                             [node_mapping[old.item()] for old in graph_edge_index[0]],
-#                             [node_mapping[old.item()] for old in graph_edge_index[1]]
-#                         ],
-#                         device=self.device,
-#                         dtype=torch.long
-#                     )
-#
-#                     # 构建单个图的Data对象
-#                     graph_data = Data(
-#                         x=node_x,
-#                         edge_index=graph_edge_index,
-#                         edge_attr=graph_edge_attr
-#                     )
-#
-#                     # 保留原始标签（如果有）
-#                     if hasattr(data, 'y'):
-#                         graph_data.y = data.y[i].clone() if data.y.dim() > 0 else data.y.clone()
-#
-#                     self.graphs.append(graph_data)
-#
-#                     # 保存预测标签
-#                     pred_label = torch.argmax(pred_probs[i]).item()
-#                     self.pred_labels.append(pred_label)
-#
-#     @staticmethod
-#     def _compute_single_mask(idx, graphs, pred_labels, vocab):
-#         """
-#         计算单个图的频繁子图
-#         用于多进程并行计算
-#         """
-#         graph = graphs[idx]
-#         pred_label = pred_labels[idx]
-#         category_smiles = vocab.get(pred_label, [])
-#         invalid_sub = set()
-#
-#         # 只转换一次原图
-#         graph_nx = to_nx(graph)
-#
-#         while True:
-#             subgraph, largest_subgraph_smiles = find_largest_subgraph(category_smiles, graph, invalid_sub)
-#
-#             if largest_subgraph_smiles is None:
-#                 print(f"    No valid subgraph found for idx {idx}, using empty subgraph.")
-#                 feature_dim = graphs[idx].x.size(1)
-#                 return Data(x=torch.empty((0, feature_dim), dtype=graphs[idx].x.dtype))
-#
-#             sub_nx = to_nx(subgraph)
-#             gm = isomorphism.GraphMatcher(graph_nx, sub_nx)
-#
-#             if gm.subgraph_is_isomorphic():
-#                 break
-#             else:
-#                 invalid_sub.add(largest_subgraph_smiles)
-#
-#         node_mappings = generate_node_mappings(graph, subgraph)
-#         subgraph.node_mappings = node_mappings
-#         return subgraph
-#
-#     def _precompute_masks(self):
-#         """
-#         预计算所有图的频繁子图，使用多进程并行优化
-#         这样在__getitem__时就不需要重复计算SMILES转换和子图匹配
-#         """
-#         # Set sharing strategy to file_system to avoid FD limits with file_descriptor
-#         torch.multiprocessing.set_sharing_strategy('file_system')
-#
-#         num_processes = min(64, mp.cpu_count(), len(self.graphs))  # Reduced number of processes
-#         print(f"  Using {num_processes} processes for parallel computation")
-#
-#         # Prepare the partial function using staticmethod
-#         process_func = partial(
-#             GraphTrainData._compute_single_mask,
-#             graphs=self.graphs,
-#             pred_labels=self.pred_labels,
-#             vocab=self.vocab
-#         )
-#
-#         with mp.Pool(processes=num_processes) as pool:
-#             results = list(tqdm(pool.imap(process_func, range(len(self.graphs))), total=len(self.graphs),
-#                                 desc="  Computing masks"))
-#
-#         self.subgraphs = results
-#
-#         print("  Parallel precomputation completed")
-#
-#     def _graph_padding(self, num_nodes, graphs):
-#         padded_graphs = []
-#         for graph in graphs:
-#             current_num_nodes = graph.num_nodes if hasattr(graph, 'num_nodes') else graph.x.size(0)
-#             new_graph = graph.clone()
-#             if current_num_nodes < num_nodes:
-#                 padding_size = num_nodes - current_num_nodes
-#                 feature_dim = graph.x.size(1)
-#                 zero_features = torch.zeros(padding_size, feature_dim, dtype=graph.x.dtype, device=graph.x.device)
-#                 new_x = torch.cat([graph.x, zero_features], dim=0)
-#                 new_graph.x = new_x
-#                 new_graph.num_nodes = num_nodes
-#                 mask = torch.cat([
-#                     torch.ones(current_num_nodes, dtype=torch.bool, device=graph.x.device),
-#                     torch.zeros(padding_size, dtype=torch.bool, device=graph.x.device)
-#                 ])
-#             else:
-#                 mask = torch.ones(current_num_nodes, dtype=torch.bool, device=graph.x.device)
-#             new_graph.real_mask = mask
-#             padded_graphs.append(new_graph)
-#         return padded_graphs
-#
-#     def __len__(self):
-#         return len(self.graphs)
-#
-#     def __getitem__(self, idx):
-#         """
-#         获取第idx个图及其预计算的频繁子图掩码
-#
-#         Returns:
-#             dict: {
-#                 "graph": PyG Data对象,
-#                 "sub_mask": 频繁子图的边掩码 (edge_mask)
-#             }
-#         """
-#         return {
-#             "graph": self.graphs[idx],
-#             # "sub_mask": self.sub_masks[idx],
-#             "subgraph": self.subgraphs[idx]
-#         }
 
 class GraphTrainData(Dataset):
     """
@@ -631,6 +409,172 @@ class GraphTrainData(Dataset):
         }
 
 
+class GraphTrainDataBA2(Dataset):
+    def __init__(self, args, dataset, patterns, pred_labels = None, pred_probs = None, gnn = None):
+        """
+        初始化GraphTrainData数据集
+
+        Args:
+            args: 参数
+            dataloader: 训练集PyG的DataLoader，用于加载图数据
+            pred_labels: 预训练GNN的分类结果
+            patterns: 频繁子图的字典（{0：patterns_0, 1: patterns_1}）
+        """
+        self.patterns_0 = patterns[0]
+        self.patterns_1 = patterns[1]
+        self.device = args.device
+        self.graphs = []  # 存储所有单个图
+        self.subgraphs = []  # 存储所有图的频繁子图
+        self.labels = pred_labels  # 存储GNN预测的标签
+        self.probs = pred_probs  # 存储GNN预测的概率
+        self.sub_masks = []  # 预计算的频繁子图掩码
+        self.dataset_name = args.dataset
+        self.thresh = args.threshold
+        self.args = args
+        if self.labels is None and self.probs is None:
+            self._predict_label(args, dataset, gnn)
+        # 预处理：从dataloader中提取所有图并进行预测
+        print("  Processing graphs and computing subgraph masks...")
+        self._process_graphs(dataset)
+        # 预计算所有频繁子图掩码
+        print("  Precomputing subgraph masks...")
+        self._precompute_masks()
+        print(f"  Precomputation completed for {len(self.graphs)} graphs")
+        print(f"  length of sub_masks: {len(self.sub_masks)}")
+        print(f"  length of graphs: {len(self.graphs)}")
+        print(f"  length of subgraphs: {len(self.subgraphs)}")
+        # args.max_subgraph_nodes = max([g.num_nodes for g in self.subgraphs]) if self.subgraphs else 0
+        # self.max_subgraph_nodes = args.max_subgraph_nodes
+        # print(f"  Max nodes in subgraphs: {args.max_subgraph_nodes}")
+        # print(f"Padding subgraph with {self.max_subgraph_nodes}")
+        # self.subgraphs = self._graph_padding(self.max_subgraph_nodes,self.subgraphs)
+
+    def _process_graphs(self, dataset):
+        for data in dataset:
+            self.graphs.append(data)
+
+    def _precompute_masks(self):
+        """
+        预计算所有图的频繁子图掩码
+        这样在__getitem__时就不需要重复计算SMILES转换和子图匹配
+        """
+        for idx in tqdm(range(len(self.graphs)), desc="  Computing masks"):
+            graph = self.graphs[idx]
+
+            if self.labels[idx] == 0:
+                patterns = self.patterns_0
+            else:
+                patterns = self.patterns_1
+
+            graph_nx = to_networkx(graph, node_attrs=['x']).to_undirected()
+            subgraph_nx = self._find_largest_subgraph(graph_nx, patterns)
+
+
+            subgraph = from_networkx(subgraph_nx)
+            node_mappings = generate_node_mappings(graph, subgraph)
+
+            subgraph.node_mappings = torch.tensor(node_mappings)
+            self.subgraphs.append(subgraph)
+
+    def _graph_padding(self, num_nodes, graphs):
+        padded_graphs = []
+        for graph in graphs:
+            current_num_nodes = graph.num_nodes if hasattr(graph, 'num_nodes') else graph.x.size(0)
+            new_graph = graph.clone()
+            if current_num_nodes < num_nodes:
+                padding_size = num_nodes - current_num_nodes
+                feature_dim = self.args.x_dim
+                zero_features = torch.zeros(padding_size, feature_dim, dtype=graph.x.dtype, device=graph.x.device)
+                new_x = torch.cat([graph.x, zero_features], dim=0)
+                new_graph.x = new_x
+                new_graph.num_nodes = num_nodes
+                mask = torch.cat([
+                    torch.ones(current_num_nodes, dtype=torch.bool, device=graph.x.device),
+                    torch.zeros(padding_size, dtype=torch.bool, device=graph.x.device)
+                ])
+            else:
+                mask = torch.ones(current_num_nodes, dtype=torch.bool, device=graph.x.device)
+            new_graph.real_mask = mask
+            padded_graphs.append(new_graph)
+        return padded_graphs
+
+    def _find_largest_subgraph(self, graph_nx, patterns):
+        """
+        在 graph_nx 中查找与 patterns 匹配的最大子图（使用 igraph VF2）
+
+        返回：从 graph_nx 中提取的子图（仍然是 networkx.Graph）
+        """
+        # 1. 先把当前大图 graph_nx 转成 igraph.Graph
+        g_ig = nx_to_igraph(graph_nx)
+
+        best_match_vertices = None  # 记录在大图中的匹配顶点（ig 的顶点 id）
+
+        # 假设 patterns 已经按“从大到小”排序（你原来就是这么设计的）
+        for pattern_nx in patterns:
+            # 2. 每个 pattern 也转成 igraph.Graph
+            p_ig = nx_to_igraph(pattern_nx)
+
+            # 3. 用 VF2 搜索所有子图同构映射
+            #    调用形式：target.get_subisomorphisms_vf2(pattern)
+            #    返回的是一个 list，每个元素是一个长度为 vcount(pattern) 的顶点 id 列表
+            mappings = g_ig.get_subisomorphisms_vf2(p_ig)
+
+            if not mappings:
+                # 这个 pattern 没有匹配，换下一个 pattern
+                continue
+
+            # 因为 patterns 假定已经按 size 从大到小排过，
+            # 找到的第一个 pattern 就是“最大”的，直接拿这个匹配即可
+            best_match_vertices = mappings[0]  # 比如 [3, 7, 10, 11] 这样的 igraph 顶点 id
+            break
+
+        # 4. 如果一个 pattern 都没匹配上，就退回原图
+        if best_match_vertices is None:
+            return graph_nx
+
+        # 5. 把 igraph 的顶点 id 映射回原来 networkx 的 node id
+        matched_nodes = [g_ig.vs[v]["orig_id"] for v in best_match_vertices]
+
+        # 6. 用这些 node id 从 graph_nx 里抽子图，保持原有属性
+        subgraph = graph_nx.subgraph(matched_nodes).copy()
+        return subgraph
+
+    def _predict_label(self, args, dataset, model):
+        """使用预训练GNN模型预测图的标签和概率"""
+        self.labels = []
+        self.probs = []
+        model = model.eval()
+        with torch.no_grad():
+            for data in dataset:
+                data = data.to(args.device)
+                out = model(data.x, data.edge_index, data.batch)
+                self.probs.extend(out.softmax(dim=1))
+                preds = out.argmax(dim=1).cpu()
+                self.labels.extend(preds)
+
+
+
+
+    def __len__(self):
+        return len(self.graphs)
+
+    def __getitem__(self, idx):
+        """
+        获取第idx个图及其预计算的频繁子图掩码
+
+        Returns:
+            dict: {
+                "graph": PyG Data对象,
+                "sub_mask": 频繁子图的边掩码 (edge_mask)
+            }
+        """
+        return {
+            "graph": self.graphs[idx],
+            # "sub_mask": self.sub_masks[idx],
+            "subgraph": self.subgraphs[idx]
+        }
+
+
 
 def custom_collate_fn(batch):
     ori_graphs, tgt_graphs, ori_preds, tgt_preds, ori_embs, tgt_embs, distances = zip(*[
@@ -672,21 +616,47 @@ def train_collate_fn(batch):
         # sub_masks.append(item['sub_mask'])
         subgraphs.append(item['subgraph'])
 
+    for subgraph in subgraphs:
+        if 'num_nodes' not in subgraph:
+            subgraph.num_nodes = subgraph.x.size(0)
+
     # 使用Batch.from_data_list合并图
     batched_graphs = Batch.from_data_list(graphs)
-    batched_subgraphs = Batch.from_data_list(subgraphs)
+    # batched_subgraphs = Batch.from_data_list(subgraphs)
+
+
 
     # 返回字典，sub_masks保持为列表
     return {
         'graphs': batched_graphs,
-        # 'sub_masks': sub_masks,
-        'subgraphs': batched_subgraphs
+        'subgraphs': subgraphs,
+        # 'subgraphs': batched_subgraphs
     }
 
 
+def nx_to_igraph(g_nx: nx.Graph) -> ig.Graph:
+    """
+    把 networkx.Graph 转成 igraph.Graph，并在 vertex 属性里保存原始 node id
+    """
+    # 固定一个节点顺序，给每个 nx 节点分配一个连续的 0..n-1 下标
+    g_nx = remove_self_loops(g_nx)
+    nodes = list(g_nx.nodes())
+    node_index = {node: i for i, node in enumerate(nodes)}
 
+    # 用这些下标来建 igraph 的边
+    edges = [(node_index[u], node_index[v]) for u, v in g_nx.edges()]
 
+    g_ig = ig.Graph(edges=edges, directed=g_nx.is_directed())
+    # 把原始的 node id 存在属性里，后面再映射回来
+    g_ig.vs["orig_id"] = nodes
 
+    return g_ig
+
+def remove_self_loops(g: nx.Graph) -> nx.Graph:
+    """返回一个拷贝，并去掉所有自环边（u,u）"""
+    g2 = g.copy()
+    g2.remove_edges_from(nx.selfloop_edges(g2))
+    return g2
 
 
 

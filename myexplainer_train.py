@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader as TorchDataLoader
 from utils import get_datasets, GraphPairData, custom_collate_fn, GraphTrainData, train_collate_fn
 from models.myexplainer import MyExplainer
 from utils.ps.mol_bpe import graph_bpe
-from utils.train_myexplainer import train_myexplainer, evaluate_myexplainer, train_myexplainer_with_subgraph
+from utils.train_myexplainer import train_myexplainer_with_subgraph
 from gnns import *
 
 from evaluation import evaluate
@@ -39,8 +39,9 @@ def parse_args():
     parser.add_argument('--cuda', type=int, default=2, help='GPU device')
     parser.add_argument('--dataset', type=str, default='mutag', help='Dataset name')
     parser.add_argument('--gnn_path', type=str, default='param/', help='GNN directory')
-    parser.add_argument('--device', type=str, default='cuda:1', help='Device to use (cpu or cuda)')
+    parser.add_argument('--device', type=str, default='cuda', help='Device to use (cpu or cuda)')
     parser.add_argument('--train_mode',type=bool,default=True,help='Current mode')
+    parser.add_argument('--task', type=str, default='graph', help='Task type: graph classification or node classification')
 
     # 数据参数
     parser.add_argument('--top_k', type=int, default=1, help='Number of similar graphs for pairing')
@@ -49,10 +50,9 @@ def parse_args():
 
     parser.add_argument("--loss_recon_x", type=float, default=1.0, help="Reconstruction loss weight for node features")
     parser.add_argument("--loss_recon_adj", type=float, default=5.0, help="Reconstruction loss weight for adjacency matrix")
-    parser.add_argument("--loss_diversity", type=float, default=0.0, help="Diversity loss weight")
-    parser.add_argument("--loss_distribution", type=float, default=0.0, help="Distribution matching loss weight")
-    parser.add_argument("--loss_kl", type=float, default=1.0, help="KL divergence loss weight")
+    parser.add_argument("--loss_kl", type=float, default=0.1, help="KL divergence loss weight")
     parser.add_argument("--loss_pred", type=float, default=5.0, help="Prediction loss weight")
+    parser.add_argument("--loss_fid", type=float, default=0.0, help="Fidelity loss weight")
 
     # 模型参数
     parser.add_argument('--x_dim', type=int, default=14, help='Node feature dimension (14 for mutag)')
@@ -64,133 +64,21 @@ def parse_args():
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
 
     # 训练参数
-    parser.add_argument('--epochs', type=int, default=30, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
 
     return parser.parse_args()
 
 
-def main1():
-    args = parse_args()
-
-    # 设置设备
-    args.device = torch.device(f'cuda:{args.cuda}' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {args.device}")
-
-    # 1. 加载数据集
-    print("\n1. Loading datasets...")
-    train_dataset, val_dataset, test_dataset = get_datasets(name=args.dataset.lower())
-    print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
-
-    # 2. 加载预训练的GNN模型
-    print("\n2. Loading pre-trained GNN...")
-    gnn = torch.load(f'{args.gnn_path}gnns/{args.dataset.lower()}_gcn.pt',
-                     map_location=args.device)
-    gnn.eval()
-    print("  GNN loaded successfully")
-
-    # 3. 创建图对数据集
-    print("\n3. Creating graph pair datasets...")
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=False)
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
-
-    # 先检测数据集中的实际最大节点数
-    print("  Detecting actual max_num_nodes from dataset...")
-    all_datasets = list(train_dataset) + list(val_dataset) + list(test_dataset)
-    actual_max_nodes = max([data.num_nodes for data in all_datasets])
-    print(f"  Actual max nodes in dataset: {actual_max_nodes}")
-
-    # 如果用户设置的max_num_nodes小于实际值，更新它
-    if args.max_num_nodes < actual_max_nodes:
-        print(f"  WARNING: Configured max_num_nodes ({args.max_num_nodes}) < actual max ({actual_max_nodes})")
-        args.max_num_nodes = actual_max_nodes + 2  # 添加小余量
-        print(f"  Updated max_num_nodes to: {args.max_num_nodes}")
-
-    train_paired_dataset = GraphPairData(args, train_loader, gnn, k=args.top_k)
-    val_paired_dataset = GraphPairData(args, val_loader, gnn, k=args.top_k)
-
-    print(f"  Train pairs: {len(train_paired_dataset)}")
-    print(f"  Val pairs: {len(val_paired_dataset)}")
-
-    # 4. 创建数据加载器
-    print("\n4. Creating data loaders...")
-    train_pair_loader = DataLoader(
-        train_paired_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        collate_fn=custom_collate_fn
-    )
-    val_eval_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False
-    )
-
-    # 5. 初始化MyExplainer模型
-    print("\n5. Initializing MyExplainer model...")
-    model = MyExplainer(args, gnn).to(args.device)
-
-    # 计算参数数量
-    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"  Model parameters: {num_params:,}")
-
-    # 6. 设置优化器
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay
-    )
-
-    # 7. 训练模型
-    print("\n6. Training MyExplainer...")
-    print("=" * 80)
-
-    trained_model, losses = train_myexplainer(
-        args=args,
-        model=model,
-        gnn=gnn,
-        pair_loader=train_pair_loader,
-        eval_loader=val_eval_loader,
-        optimizer=optimizer,
-        epochs=args.epochs
-    )
-
-    # 8. 评估模型（使用原始验证集，不使用配对数据）
-    print("\n7. Evaluating on validation set...")
-    print("=" * 80)
-
-
-    val_metrics = evaluate_myexplainer(
-        args=args,
-        model=trained_model,
-        gnn=gnn,
-        val_loader=val_eval_loader  # 使用原始验证集
-    )
-
-    # 9. 保存最终模型
-    print("\n8. Saving final model...")
-    torch.save({
-        'args': args,
-        'model_state_dict': trained_model.state_dict(),
-        'losses': losses,
-        'val_metrics': val_metrics
-    }, f'{args.gnn_path}myexplainer_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pt')
-    print(f"  Model saved to {args.gnn_path}myexplainer_best.pt")
-
-    print("\n" + "=" * 80)
-    print("Training completed successfully!")
-    print("=" * 80)
-
 def main():
     args = parse_args()
     args.loss_proportion = {
         'recon_x': args.loss_recon_x,
         'recon_adj': args.loss_recon_adj,
-        'diversity': args.loss_diversity,
-        'distribution': args.loss_distribution,
         'kl': args.loss_kl,
-        'pred': args.loss_pred
+        'pred': args.loss_pred,
+        'fid': args.loss_fid
     }
 
     # 设置设备为torch.device对象
@@ -542,85 +430,85 @@ def main():
     print("\n9. Evaluating on validation set...")
     print("=" * 80)
 
-    evaluation_metrics = evaluate(
-        args=args,
-        model=trained_model,
-        gnn=gnn,
-        data_loader=val_loader_masked,
-    )
-    print("\nEvaluation Results on Validation Set:")
-    print(
-        "  Validity ↑: {:.4f} (successful: {}/total: {})".format(
-            evaluation_metrics["validity"],
-            int(evaluation_metrics["successful"]),
-            int(evaluation_metrics["total"]),
-        )
-    )
-    print(
-        "  Proximity ↓: {:.4f}".format(
-            evaluation_metrics["proximity"]
-        )
-    )
-    print(
-        "  Fidelity+ ↑: {:.4f}".format(
-            evaluation_metrics["fidelity+"]
-        )
-    )
-    print(
-        "  Fidelity- ↓: {:.4f}".format(
-            evaluation_metrics["fidelity-"]
-        )
-    )
-    print(
-        "  Fidelity_prob ↑: {:.4f}".format(
-            evaluation_metrics["fidelity"]
-        )
-    )
-    print(
-        "  Sparsity ↑: {:.4f}".format(
-            evaluation_metrics["sparsity"]
-        )
-    )
+    # evaluation_metrics = evaluate(
+    #     args=args,
+    #     model=trained_model,
+    #     gnn=gnn,
+    #     data_loader=val_loader_masked,
+    # )
+    # print("\nEvaluation Results on Validation Set:")
+    # print(
+    #     "  Validity ↑: {:.4f} (successful: {}/total: {})".format(
+    #         evaluation_metrics["validity"],
+    #         int(evaluation_metrics["successful"]),
+    #         int(evaluation_metrics["total"]),
+    #     )
+    # )
+    # print(
+    #     "  Proximity ↓: {:.4f}".format(
+    #         evaluation_metrics["proximity"]
+    #     )
+    # )
+    # print(
+    #     "  Fidelity+ ↑: {:.4f}".format(
+    #         evaluation_metrics["fidelity+"]
+    #     )
+    # )
+    # print(
+    #     "  Fidelity- ↓: {:.4f}".format(
+    #         evaluation_metrics["fidelity-"]
+    #     )
+    # )
+    # print(
+    #     "  Fidelity_prob ↑: {:.4f}".format(
+    #         evaluation_metrics["fidelity"]
+    #     )
+    # )
+    # print(
+    #     "  Sparsity ↑: {:.4f}".format(
+    #         evaluation_metrics["sparsity"]
+    #     )
+    # )
 
-    evaluation_metrics = evaluate(
-        args=args,
-        model=trained_model,
-        gnn=gnn,
-        data_loader=train_loader_masked,
-    )
-    print("\nEvaluation Results on Training Set:")
-    print(
-        "  Validity ↑: {:.4f} (successful: {}/total: {})".format(
-            evaluation_metrics["validity"],
-            int(evaluation_metrics["successful"]),
-            int(evaluation_metrics["total"]),
-        )
-    )
-    print(
-        "  Proximity ↓: {:.4f}".format(
-            evaluation_metrics["proximity"]
-        )
-    )
-    print(
-        "  Fidelity+ ↑: {:.4f}".format(
-            evaluation_metrics["fidelity+"]
-        )
-    )
-    print(
-        "  Fidelity- ↓: {:.4f}".format(
-            evaluation_metrics["fidelity-"]
-        )
-    )
-    print(
-        "  Fidelity_prob ↑: {:.4f}".format(
-            evaluation_metrics["fidelity"]
-        )
-    )
-    print(
-        "  Sparsity ↑: {:.4f}".format(
-            evaluation_metrics["sparsity"]
-        )
-    )
+    # evaluation_metrics = evaluate(
+    #     args=args,
+    #     model=trained_model,
+    #     gnn=gnn,
+    #     data_loader=train_loader_masked,
+    # )
+    # print("\nEvaluation Results on Training Set:")
+    # print(
+    #     "  Validity ↑: {:.4f} (successful: {}/total: {})".format(
+    #         evaluation_metrics["validity"],
+    #         int(evaluation_metrics["successful"]),
+    #         int(evaluation_metrics["total"]),
+    #     )
+    # )
+    # print(
+    #     "  Proximity ↓: {:.4f}".format(
+    #         evaluation_metrics["proximity"]
+    #     )
+    # )
+    # print(
+    #     "  Fidelity+ ↑: {:.4f}".format(
+    #         evaluation_metrics["fidelity+"]
+    #     )
+    # )
+    # print(
+    #     "  Fidelity- ↓: {:.4f}".format(
+    #         evaluation_metrics["fidelity-"]
+    #     )
+    # )
+    # print(
+    #     "  Fidelity_prob ↑: {:.4f}".format(
+    #         evaluation_metrics["fidelity"]
+    #     )
+    # )
+    # print(
+    #     "  Sparsity ↑: {:.4f}".format(
+    #         evaluation_metrics["sparsity"]
+    #     )
+    # )
 
     print("\n" + "=" * 80)
     print("Training completed successfully!")

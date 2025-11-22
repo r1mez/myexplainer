@@ -1,7 +1,11 @@
+from typing import Dict
+
+import networkx as nx
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.utils import to_dense_adj, to_dense_batch
+from torch_geometric.data import Data
+from torch_geometric.utils import to_dense_adj, to_dense_batch, to_networkx
 from tqdm import tqdm
 import os
 from datetime import datetime
@@ -12,599 +16,10 @@ import time
 
 import matplotlib.pyplot as plt
 
-
-
-
-
-def train_myexplainer(args, model, gnn, pair_loader, eval_loader, optimizer, epochs=200, log_dir='logs'):
-    """
-    训练MyExplainer模型的主函数
-
-    流程:
-    1. 对每个batch的图对 (原始图, 目标图):
-       - 原始图 -> 编码器 -> 潜在表示 z (使用反事实标签 y_cf)
-       - z + y_cf -> 解码器 -> 重构图
-       - 目标图 -> 编码器 -> 目标潜在表示 z_tgt (使用原标签 y)
-    2. 计算损失:
-       - 重构损失: 节点特征重构 + 邻接矩阵重构
-       - KL散度: 使原始图编码分布接近目标图编码分布
-       - 预测损失: 重构图经过GNN后应预测为y_cf
-    3. 反向传播优化
-
-    参数:
-        args: 参数对象，包含device, max_num_nodes等
-        model: MyExplainer模型
-        gnn: 预训练的GNN分类器
-        pair_loader: GraphPairData的DataLoader
-        optimizer: 优化器
-        epochs: 训练轮数
-        log_dir: 日志保存目录
-
-    返回:
-        model: 训练好的模型
-        losses: 损失历史字典
-        log_file: 日志文件路径
-    """
-    model.train()
-    gnn.eval()  # GNN保持评估模式
-
-    # 验证max_num_nodes设置
-    if not hasattr(args, 'max_num_nodes') or args.max_num_nodes is None:
-        raise ValueError("args.max_num_nodes must be set before training!")
-
-    # 创建日志目录
-    os.makedirs(log_dir, exist_ok=True)
-
-    # 生成带时间戳的日志文件名
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f"train_myexplainer_{timestamp}.txt")
-
-    # 写入日志头部信息
-    with open(log_file, 'w') as f:
-        f.write("=" * 80 + "\n")
-        f.write("MyExplainer Training Log\n")
-        f.write("=" * 80 + "\n")
-        f.write(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write("\n")
-
-        # 记录超参数
-        f.write("-" * 80 + "\n")
-        f.write("Hyperparameters:\n")
-        f.write("-" * 80 + "\n")
-
-        # 遍历args的所有属性
-        args_dict = vars(args)
-        for key in sorted(args_dict.keys()):
-            value = args_dict[key]
-            # 跳过device对象（它的字符串表示很长）
-            if key == 'device':
-                f.write(f"  {key}: {str(value)}\n")
-            else:
-                f.write(f"  {key}: {value}\n")
-
-        f.write("\n")
-        f.write("-" * 80 + "\n")
-        f.write("Training Configuration:\n")
-        f.write("-" * 80 + "\n")
-        f.write(f"  Total Epochs: {epochs}\n")
-        f.write(f"  Max Num Nodes: {args.max_num_nodes}\n")
-        f.write(f"  Optimizer: {type(optimizer).__name__}\n")
-        f.write(f"  Learning Rate: {optimizer.param_groups[0]['lr']}\n")
-        f.write(f"  Weight Decay: {optimizer.param_groups[0]['weight_decay']}\n")
-        f.write("\n")
-
-        # 记录损失权重
-        f.write("-" * 80 + "\n")
-        f.write("Loss Weights:\n")
-        f.write("-" * 80 + "\n")
-        f.write(f"  alpha_recon_x: 1.0\n")
-        f.write(f"  alpha_recon_adj: 1.0\n")
-        f.write(f"  alpha_kl: 0.01\n")
-        f.write(f"  alpha_pred: 0.1\n")
-        f.write("\n")
-        f.write("=" * 80 + "\n")
-        f.write("Training Progress:\n")
-        f.write("=" * 80 + "\n\n")
-
-    print(f"Training with max_num_nodes={args.max_num_nodes}")
-    print(f"Log file: {log_file}")
-
-    # 记录损失历史
-    losses = {
-        'total': [],
-        'recon_x': [],
-        'recon_adj': [],
-        'kl': [],
-        'pred': []
-    }
-
-    best_loss = float('inf')
-    best_epoch = 0
-
-    for epoch in range(epochs):
-
-        model.train()
-        gnn.eval()
-        epoch_losses = {
-            'total': 0.0,
-            'recon_x': 0.0,
-            'recon_adj': 0.0,
-            'kl': 0.0,
-            'pred': 0.0
-        }
-
-        num_batches = 0
-
-        progress_bar = tqdm(pair_loader, desc=f'Epoch {epoch+1}/{epochs}')
-
-        for batch in progress_bar:
-            # 1. 准备数据
-            ori_graph = batch['ori_graph'].to(args.device)
-            tgt_graph = batch['tgt_graph'].to(args.device)
-            ori_pred = batch['ori_pred'].to(args.device)  # 原始预测标签
-            tgt_pred = batch['tgt_pred'].to(args.device)  # 目标预测标签
-
-            batch_size = ori_graph.num_graphs
-
-            # 将图转换为dense格式 (batch_size, max_num_nodes, feature_dim)
-            ori_x, ori_mask = to_dense_batch(ori_graph.x, ori_graph.batch,
-                                             max_num_nodes=args.max_num_nodes)
-            ori_adj = to_dense_adj(ori_graph.edge_index, ori_graph.batch,
-                                   # edge_attr=ori_graph.edge_attr,
-                                   max_num_nodes=args.max_num_nodes)
-
-            tgt_x, tgt_mask = to_dense_batch(tgt_graph.x, tgt_graph.batch,
-                                             max_num_nodes=args.max_num_nodes)
-            tgt_adj = to_dense_adj(tgt_graph.edge_index, tgt_graph.batch,
-                                   # edge_attr=tgt_graph.edge_attr,
-                                   max_num_nodes=args.max_num_nodes)
-
-            # 准备反事实标签 (batch_size, 1)
-            # y_cf是目标标签(我们想生成的标签), y是原始标签
-            y_cf = tgt_pred.float().unsqueeze(1)  # 反事实标签
-            y = ori_pred.float().unsqueeze(1)     # 原始标签
-
-            # 2. 前向传播
-            optimizer.zero_grad()
-
-            outputs = model(
-                features=ori_x,
-                adj=ori_adj,
-                y_cf=y_cf,
-                features_tgt=tgt_x,
-                adj_tgt=tgt_adj,
-                y=y
-            )
-
-            x_recon = outputs['x_recon']
-            adj_recon = outputs['adj_recon']
-            z_mu = outputs['z_mu']
-            z_logvar = outputs['z_logvar']
-            z_mu_tgt = outputs['z_mu_tgt']
-            z_logvar_tgt = outputs['z_logvar_tgt']
-
-            # 3. 计算损失
-            # 3.1 重构损失 - 节点特征
-            # Reshape: (batch_size, max_num_nodes * x_dim) -> (batch_size, max_num_nodes, x_dim)
-            x_recon_reshaped = x_recon.view(batch_size, args.max_num_nodes, args.x_dim)
-            loss_recon_x = F.mse_loss(x_recon_reshaped, tgt_x, reduction='none')
-            # 只计算有效节点的损失
-            loss_recon_x = (loss_recon_x * tgt_mask.unsqueeze(-1)).sum() / tgt_mask.sum()
-
-            # 3.2 重构损失 - 邻接矩阵
-            # Reshape: (batch_size, max_num_nodes * max_num_nodes) -> (batch_size, max_num_nodes, max_num_nodes)
-            adj_recon_reshaped = adj_recon.view(batch_size, args.max_num_nodes, args.max_num_nodes)
-
-            # 处理边特征: 如果有边特征，取第一维度；否则使用二值邻接矩阵
-            if tgt_adj.dim() == 4:  # (batch_size, max_num_nodes, max_num_nodes, edge_attr_dim)
-                # 简化：将边属性转换为二值邻接矩阵 (存在边=1)
-                tgt_adj_binary = (tgt_adj.sum(dim=-1) > 0).float()
-            else:
-                tgt_adj_binary = tgt_adj
-
-            loss_recon_adj = F.binary_cross_entropy(adj_recon_reshaped, tgt_adj_binary, reduction='none')
-            # 创建邻接矩阵掩码 (只计算有效节点对的损失)
-            adj_mask = tgt_mask.unsqueeze(-1) * tgt_mask.unsqueeze(-2)  # (batch_size, max_num_nodes, max_num_nodes)
-            loss_recon_adj = (loss_recon_adj * adj_mask).sum() / adj_mask.sum()
-
-            # 3.3 KL散度 - 使原始图的潜在分布接近目标图的潜在分布
-            # KL(q(z|G_ori, y_cf) || q(z|G_tgt, y))
-            # kl_loss = -0.5 * torch.sum(
-            #     1 + z_logvar - z_logvar_tgt
-            #     - ((z_mu - z_mu_tgt).pow(2) + z_logvar.exp()) / z_logvar_tgt.exp()
-            # )
-            # kl_loss = kl_loss / batch_size
-
-            # 3.3 KL散度 - 标准VAE KL散度损失
-            # KL(q(z|G_ori, y_cf) || p(z)) 其中 p(z) = N(0, I)
-            kl_loss = -0.5 * torch.sum(1 + z_logvar - z_mu.pow(2) - z_logvar.exp())
-            kl_loss = kl_loss / batch_size
-
-
-            # 3.4 预测损失 - 重构图应该被GNN预测为y_cf
-            # 必须将重构的dense图转换回sparse格式，然后交给GNN预测
-
-            # 将重构的dense图转换为sparse格式
-            recon_graphs_list = []
-            recon_batch_indices = []
-
-            for b in range(batch_size):
-                # 提取该样本的节点特征和邻接矩阵
-                num_nodes = tgt_mask[b].sum().item()
-                if num_nodes == 0:
-                    continue
-
-                # 节点特征: 将连续值转换为one-hot (取argmax)
-                x_sample = x_recon_reshaped[b, :num_nodes, :]  # (num_nodes, x_dim)
-                x_sample_onehot = torch.zeros_like(x_sample)
-                atom_indices = torch.argmax(x_sample, dim=-1)
-                x_sample_onehot.scatter_(1, atom_indices.unsqueeze(-1), 1.0)
-
-                # 邻接矩阵: 使用阈值二值化
-                adj_sample = adj_recon_reshaped[b, :num_nodes, :num_nodes]  # (num_nodes, num_nodes)
-
-                # 构建edge_index (sparse格式)
-                edge_threshold = 0.5
-                edge_indices = (adj_sample > edge_threshold).nonzero(as_tuple=False)  # (num_edges, 2)
-
-                if edge_indices.size(0) > 0:
-                    edge_index_sample = edge_indices.t()  # (2, num_edges)
-                else:
-                    # 如果没有边，创建空的edge_index
-                    edge_index_sample = torch.empty((2, 0), dtype=torch.long, device=args.device)
-
-                # 保存重构的图数据
-                recon_graphs_list.append({
-                    'x': x_sample_onehot,
-                    'edge_index': edge_index_sample,
-                    'num_nodes': num_nodes
-                })
-                recon_batch_indices.extend([b] * num_nodes)
-
-            # 合并所有重构的图为一个大batch
-            if len(recon_graphs_list) > 0:
-                # 拼接所有节点特征
-                recon_x_all = torch.cat([g['x'] for g in recon_graphs_list], dim=0)
-
-                # 拼接所有edge_index，注意需要偏移节点索引
-                recon_edge_indices = []
-                node_offset = 0
-                for g in recon_graphs_list:
-                    if g['edge_index'].size(1) > 0:
-                        edge_index_offset = g['edge_index'] + node_offset
-                        recon_edge_indices.append(edge_index_offset)
-                    node_offset += g['num_nodes']
-
-                if len(recon_edge_indices) > 0:
-                    recon_edge_index_all = torch.cat(recon_edge_indices, dim=1)
-                else:
-                    recon_edge_index_all = torch.empty((2, 0), dtype=torch.long, device=args.device)
-
-                # 创建batch索引
-                recon_batch = torch.tensor(recon_batch_indices, dtype=torch.long, device=args.device)
-
-                # 使用GNN进行预测
-                pred_logits_recon = gnn.get_pred(recon_x_all, recon_edge_index_all, recon_batch)[0]
-
-                # 计算预测损失: 希望重构图被预测为y_cf
-                # 只对成功重构的图计算损失
-                valid_indices = torch.tensor([g_idx for g_idx, g in enumerate(recon_graphs_list)],
-                                             dtype=torch.long, device=args.device)
-                y_cf_valid = tgt_pred[valid_indices]
-
-                loss_pred = F.cross_entropy(pred_logits_recon, y_cf_valid.long(), reduction='mean')
-            else:
-                # 如果没有有效的重构图，损失为0
-                loss_pred = torch.tensor(0.0, device=args.device)
-
-            # 3.5 总损失
-            # 权重可以调整
-            alpha_recon_x = 1.0
-            alpha_recon_adj = 1.0
-            alpha_kl = 0.01  # KL散度权重通常较小
-            alpha_pred = 0.1
-
-            total_loss = (
-                alpha_recon_x * loss_recon_x +
-                alpha_recon_adj * loss_recon_adj +
-                alpha_kl * kl_loss +
-                alpha_pred * loss_pred
-            )
-
-            # 4. 反向传播
-            total_loss.backward()
-
-            # 梯度裁剪 (可选)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-            optimizer.step()
-
-            # 5. 记录损失
-            epoch_losses['total'] += total_loss.item()
-            epoch_losses['recon_x'] += loss_recon_x.item()
-            epoch_losses['recon_adj'] += loss_recon_adj.item()
-            epoch_losses['kl'] += kl_loss.item()
-            epoch_losses['pred'] += loss_pred.item()
-            num_batches += 1
-
-            # 更新进度条
-            progress_bar.set_postfix({
-                'loss': f'{total_loss.item():.4f}',
-                'recon_x': f'{loss_recon_x.item():.4f}',
-                'recon_adj': f'{loss_recon_adj.item():.4f}',
-                'kl': f'{kl_loss.item():.4f}'
-            })
-
-
-
-        # 计算epoch平均损失
-        for key in epoch_losses:
-            epoch_losses[key] /= num_batches
-            losses[key].append(epoch_losses[key])
-
-        # 打印epoch总结
-        epoch_summary = f"\nEpoch {epoch+1}/{epochs} Summary:"
-        print(epoch_summary)
-        print(f"  Total Loss: {epoch_losses['total']:.4f}")
-        print(f"  Recon X Loss: {epoch_losses['recon_x']:.4f}")
-
-        print(f"  Recon Adj Loss: {epoch_losses['recon_adj']:.4f}")
-        print(f"  KL Loss: {epoch_losses['kl']:.4f}")
-        print(f"  Pred Loss: {epoch_losses['pred']:.4f}")
-
-        # 写入日志文件
-        with open(log_file, 'a') as f:
-            f.write(f"Epoch {epoch+1}/{epochs}:\n")
-            f.write(f"  Total Loss:     {epoch_losses['total']:.6f}\n")
-            f.write(f"  Recon X Loss:   {epoch_losses['recon_x']:.6f}\n")
-            f.write(f"  Recon Adj Loss: {epoch_losses['recon_adj']:.6f}\n")
-            f.write(f"  KL Loss:        {epoch_losses['kl']:.6f}\n")
-            f.write(f"  Pred Loss:      {epoch_losses['pred']:.6f}\n")
-
-        # 保存最佳模型
-        is_best = False
-        if epoch_losses['total'] < best_loss:
-            best_loss = epoch_losses['total']
-            best_epoch = epoch + 1
-            is_best = True
-            torch.save(model.state_dict(), f'param/myexplainer_best.pt')
-            print(f"  *** Saved best model with loss {best_loss:.4f} ***")
-
-            # 记录到日志
-            with open(log_file, 'a') as f:
-                f.write(f"  >>> Best model saved! (loss: {best_loss:.6f})\n")
-
-        with open(log_file, 'a') as f:
-            f.write("\n")
-
-        # 定期保存checkpoint
-        if (epoch + 1) % 10 == 0:
-            checkpoint_path = f'param/myexplainer_epoch_{epoch+1}.pt'
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': epoch_losses['total'],
-            }, checkpoint_path)
-            print(f"  Checkpoint saved to {checkpoint_path}")
-
-            # 记录到日志
-            with open(log_file, 'a') as f:
-                f.write(f"  Checkpoint saved: {checkpoint_path}\n\n")
-
-
-
-    # 训练结束，写入总结
-    end_time = datetime.now()
-
-    with open(log_file, 'a') as f:
-        f.write("\n")
-        f.write("=" * 80 + "\n")
-        f.write("Training Summary:\n")
-        f.write("=" * 80 + "\n")
-        f.write(f"End Time: {end_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Total Epochs: {epochs}\n")
-        f.write(f"Best Epoch: {best_epoch}\n")
-        f.write(f"Best Loss: {best_loss:.6f}\n")
-        f.write("\n")
-
-        f.write("Final Loss Values:\n")
-        f.write(f"  Total Loss:     {losses['total'][-1]:.6f}\n")
-        f.write(f"  Recon X Loss:   {losses['recon_x'][-1]:.6f}\n")
-        f.write(f"  Recon Adj Loss: {losses['recon_adj'][-1]:.6f}\n")
-        f.write(f"  KL Loss:        {losses['kl'][-1]:.6f}\n")
-        f.write(f"  Pred Loss:      {losses['pred'][-1]:.6f}\n")
-        f.write("\n")
-        f.write("=" * 80 + "\n")
-
-    # 加载最佳模型
-    model.load_state_dict(torch.load(f'param/myexplainer_best.pt'))
-    print("\nTraining completed! Loaded best model.")
-    print(f"Best model from epoch {best_epoch} with loss {best_loss:.4f}")
-    print(f"Training log saved to: {log_file}")
-
-    return model, losses
-
-
-def evaluate_myexplainer(args, model, gnn, val_loader):
-    """
-    评估MyExplainer模型 - 类似测试阶段，只需要原图即可生成反事实解释
-
-    评估流程：
-    1. 对验证集中的每个图，使用GNN获取原始预测
-    2. 自动翻转预测标签作为反事实目标
-    3. 使用MyExplainer生成反事实解释图
-    4. 将生成的图转换回sparse格式，通过GNN预测
-    5. 计算成功率（生成图被GNN预测为反事实标签）
-
-    参数:
-        args: 参数对象
-        model: 训练好的MyExplainer模型
-        gnn: 预训练的GNN分类器
-        val_loader: 验证数据的DataLoader (原始数据，非配对)
-
-    返回:
-        metrics: 评估指标字典
-    """
-    model.eval()
-    gnn.eval()
-
-    total_samples = 0
-    successful_cf = 0  # 成功生成反事实的数量
-    total_recon_loss = 0.0
-    num_batches = 0
-
-    with torch.no_grad():
-        for batch in tqdm(val_loader, desc='Evaluating'):
-            batch = batch.to(args.device)
-            batch_size = batch.num_graphs
-
-            # 1. 使用GNN获取原始预测
-            ori_pred_logits = gnn.get_pred(batch.x, batch.edge_index, batch.batch)[0]
-            ori_pred = ori_pred_logits.argmax(dim=1)  # (batch_size,)
-
-            # 2. 反事实标签：翻转预测（0->1, 1->0）
-            cf_pred = 1 - ori_pred  # (batch_size,)
-
-            # 3. 转换为dense格式
-            ori_x, ori_mask = to_dense_batch(batch.x, batch.batch,
-                                             max_num_nodes=args.max_num_nodes)
-            ori_adj = to_dense_adj(batch.edge_index, batch.batch,
-                                   max_num_nodes=args.max_num_nodes)
-
-            # 4. 准备标签
-            y_cf = cf_pred.float().unsqueeze(1)  # Target label (counterfactual)
-            y = ori_pred.float().unsqueeze(1)     # Original label
-
-            # 5. 前向传播 - 生成反事实图
-            # 使用原始图作为tgt_graph的占位符
-            outputs = model(
-                features=ori_x,
-                adj=ori_adj,
-                y_cf=y_cf,
-                features_tgt=ori_x,  # 占位符
-                adj_tgt=ori_adj,      # 占位符
-                y=y
-            )
-
-            x_recon = outputs['x_recon']
-            adj_recon = outputs['adj_recon']
-
-            # 6. Reshape重构结果
-            x_recon_reshaped = x_recon.view(batch_size, args.max_num_nodes, args.x_dim)
-            adj_recon_reshaped = adj_recon.view(batch_size, args.max_num_nodes, args.max_num_nodes)
-
-            # 7. 计算重构损失（可选，用于监控）
-            loss_x = F.mse_loss(x_recon_reshaped, ori_x, reduction='none')
-            loss_x = (loss_x * ori_mask.unsqueeze(-1)).sum() / ori_mask.sum()
-
-            if ori_adj.dim() == 4:
-                ori_adj_binary = (ori_adj.sum(dim=-1) > 0).float()
-            else:
-                ori_adj_binary = ori_adj
-
-            loss_adj = F.binary_cross_entropy(adj_recon_reshaped, ori_adj_binary, reduction='none')
-            adj_mask = ori_mask.unsqueeze(-1) * ori_mask.unsqueeze(-2)
-            loss_adj = (loss_adj * adj_mask).sum() / adj_mask.sum()
-
-            total_recon_loss += (loss_x + loss_adj).item()
-
-            # 8. 将重构的dense图转换为sparse格式
-            recon_graphs_list = []
-            recon_batch_indices = []
-
-            for b in range(batch_size):
-                num_nodes = ori_mask[b].sum().item()
-                if num_nodes == 0:
-                    continue
-
-                # 节点特征: 离散化为one-hot
-                x_sample = x_recon_reshaped[b, :num_nodes, :]
-                x_sample_onehot = torch.zeros_like(x_sample)
-                atom_indices = torch.argmax(x_sample, dim=-1)
-                x_sample_onehot.scatter_(1, atom_indices.unsqueeze(-1), 1.0)
-
-                # 邻接矩阵: 阈值化
-                adj_sample = adj_recon_reshaped[b, :num_nodes, :num_nodes]
-                edge_threshold = 0.5
-                edge_indices = (adj_sample > edge_threshold).nonzero(as_tuple=False)
-
-                if edge_indices.size(0) > 0:
-                    edge_index_sample = edge_indices.t()
-                else:
-                    edge_index_sample = torch.empty((2, 0), dtype=torch.long, device=args.device)
-
-                recon_graphs_list.append({
-                    'x': x_sample_onehot,
-                    'edge_index': edge_index_sample,
-                    'num_nodes': num_nodes
-                })
-                recon_batch_indices.extend([b] * num_nodes)
-
-            # 9. 合并所有重构的图并用GNN预测
-            if len(recon_graphs_list) > 0:
-                recon_x_all = torch.cat([g['x'] for g in recon_graphs_list], dim=0)
-
-                recon_edge_indices = []
-                node_offset = 0
-                for g in recon_graphs_list:
-                    if g['edge_index'].size(1) > 0:
-                        edge_index_offset = g['edge_index'] + node_offset
-                        recon_edge_indices.append(edge_index_offset)
-                    node_offset += g['num_nodes']
-
-                if len(recon_edge_indices) > 0:
-                    recon_edge_index_all = torch.cat(recon_edge_indices, dim=1)
-                else:
-                    recon_edge_index_all = torch.empty((2, 0), dtype=torch.long, device=args.device)
-
-                recon_batch = torch.tensor(recon_batch_indices, dtype=torch.long, device=args.device)
-
-                # 使用GNN预测重构图
-                try:
-                    pred_logits_recon = gnn.get_pred(recon_x_all, recon_edge_index_all, recon_batch)[0]
-                    pred_labels_recon = pred_logits_recon.argmax(dim=1)
-
-                    # 检查成功率
-                    valid_indices = torch.arange(len(recon_graphs_list), device=args.device)
-                    cf_pred_valid = cf_pred[valid_indices]
-
-                    successful_cf += (pred_labels_recon == cf_pred_valid).sum().item()
-                    total_samples += len(recon_graphs_list)
-                except Exception as e:
-                    # 如果预测失败，记录但继续
-                    print(f"Warning: Failed to predict reconstructed graphs: {e}")
-                    total_samples += len(recon_graphs_list)
-
-            num_batches += 1
-
-    # 计算指标
-    avg_recon_loss = total_recon_loss / num_batches if num_batches > 0 else 0.0
-    success_rate = successful_cf / total_samples if total_samples > 0 else 0.0
-
-    metrics = {
-        'avg_recon_loss': avg_recon_loss,
-        'success_rate': success_rate,
-        'successful_cf': successful_cf,
-        'total_samples': total_samples
-    }
-
-    print(f"\n{'='*60}")
-    print(f"Evaluation Results:")
-    print(f"{'='*60}")
-    print(f"  Total samples: {total_samples}")
-    print(f"  Successful counterfactuals: {successful_cf}")
-    print(f"  Success rate: {success_rate*100:.2f}%")
-    print(f"  Average reconstruction loss: {avg_recon_loss:.4f}")
-    print(f"{'='*60}\n")
-
-    return metrics
-
-
-
-
-
-
+from utils.batch_utils import core_data_from_batch
+from utils.graph_utils import process_outputs
+from utils.train_utils import compute_loss_causality
+from utils.vis_utils import visualize_explainer_graph
 
 
 def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader, optimizer, epochs=200, log_dir='logs'):
@@ -682,10 +97,9 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader,
         'total': [],
         'recon_x': [],
         'recon_adj': [],
-        'diversity': [],
-        'distribution': [],
         'kl': [],
-        'pred': []
+        'pred': [],
+        # 'fid': []
     }
 
     best_loss = float('inf')
@@ -705,10 +119,9 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader,
             'total': 0.0,
             'recon_x': 0.0,
             'recon_adj': 0.0,
-            'diversity': 0.0,
-            'distribution': 0.0,
             'kl': 0.0,
-            'pred': 0.0
+            'pred': 0.0,
+            # 'fid': 0.0
         }
 
         num_batches = 0
@@ -716,11 +129,8 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader,
 
 
         for batch_idx, batch in enumerate(progress_bar):
-            batch_losses = {"recon": 0.0, "kl": 0.0, "pred": 0.0}
             # 1. 准备数据
             graphs_batch = batch['graphs'].to(args.device)
-            # freq_sub_masks = batch['freq_sub_masks']  # list of edge masks
-            batch_size = graphs_batch.num_graphs
 
 
             # 2. 使用GNN获取原始预测
@@ -738,44 +148,26 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader,
 
 
 
+            # 第一步：提取批量信息
+            if args.edge_attr_dim != 0:
+                all_subgraph_x, all_subgraph_adj, all_subgraph_edge_attr = core_data_from_batch(args, batch)
 
-            subgraph_x_list = []
-            zero_x_template = torch.zeros(args.max_subgraph_nodes, args.x_dim, device=args.device)
+                outputs = model(
+                    x=all_subgraph_x,
+                    adj=all_subgraph_adj,
+                    y_cf=y_cf,
+                    edge_attr = all_subgraph_edge_attr
+                )
+            else:
+                all_subgraph_x, all_subgraph_adj, _ = core_data_from_batch(args, batch)
 
-            # 第一步：提取所有子图节点特征（不调用model）
-            for b in range(batch_size):
-                # 提取单个子图
-                mask = (batch['subgraphs'].batch == b)
-                num_nodes_tensor = mask.sum()  # 保持为张量，避免 .item() 过早转换
+                outputs = model(
+                    x=all_subgraph_x,
+                    adj=all_subgraph_adj,
+                    y_cf=y_cf
+                )
 
-                subgraph_x = batch['subgraphs'].x[mask]  # 提取该子图的节点特征
-
-                # 使用clone而不是zeros创建新张量
-                subgraph_x_padded = zero_x_template.clone()
-                num_nodes_i = num_nodes_tensor.item()  # 只在赋值时转换
-                if num_nodes_i > 0:  # 避免空图
-                    subgraph_x_padded[:num_nodes_i] = subgraph_x
-
-                # 存储子图数据
-                subgraph_x_list.append(subgraph_x_padded)
-
-            # 第二步：堆叠所有子图节点特征
-            all_subgraph_x = torch.stack(subgraph_x_list, dim=0)  # (B, max_num_nodes, x_dim)
-
-            all_subgraph_adj = to_dense_adj(
-                batch["subgraphs"].edge_index,
-                batch=batch["subgraphs"].batch,
-                max_num_nodes=args.max_subgraph_nodes
-            )
-            all_subgraph_x, all_subgraph_adj = all_subgraph_x.to(args.device), all_subgraph_adj.to(args.device)
-
-            outputs = model(
-                features=all_subgraph_x,
-                adj=all_subgraph_adj,
-                y_cf=y_cf
-            )
-
-            # 第三步：使用批量输出结果重构每个图
+            # 第二步：使用批量输出结果重构每个图
             concated_graphs = concat_graphs(args, outputs, batch)
 
             # 5. 计算损失
@@ -797,10 +189,9 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader,
             epoch_losses['total'] += batch_losses['total'].item()
             epoch_losses['recon_x'] += batch_losses['recon_x'].item()
             epoch_losses['recon_adj'] += batch_losses['recon_adj'].item()
-            epoch_losses['diversity'] += batch_losses['diversity'].item()
-            epoch_losses['distribution'] += batch_losses['distribution'].item()
             epoch_losses['kl'] += batch_losses['kl'].item()
             epoch_losses['pred'] += batch_losses['pred'].item()
+            # epoch_losses['fid'] += batch_losses['fid'].item()
             num_batches += 1
 
             # 更新进度条
@@ -808,10 +199,9 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader,
                 'loss': f'{total_loss.item():.4f}',
                 'recon_x': f'{batch_losses["recon_x"].item():.4f}',
                 'recon_adj': f'{batch_losses["recon_adj"].item():.4f}',
-                'diversity': f'{batch_losses["diversity"].item():.4f}',
-                'distribution': f'{batch_losses["distribution"].item():.4f}',
                 'kl': f'{batch_losses["kl"].item():.4f}',
                 'pred': f'{batch_losses["pred"].item():.4f}',
+                # 'fid': f'{batch_losses["fid"]:.4f}',
             })
 
         # 计算epoch平均损失
@@ -826,10 +216,9 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader,
         print(f"  Total Loss: {epoch_losses['total']:.4f}")
         print(f"  Recon X Loss: {epoch_losses['recon_x']:.4f}")
         print(f"  Recon Adj Loss: {epoch_losses['recon_adj']:.4f}")
-        print(f"  Diversity Loss: {epoch_losses['diversity']:.4f}")
-        print(f"  Distribution Loss: {epoch_losses['distribution']:.4f}")
         print(f"  KL Loss: {epoch_losses['kl']:.4f}")
         print(f"  Pred Loss: {epoch_losses['pred']:.4f}")
+        # print(f"  FID Loss: {epoch_losses['fid']:.4f}")
 
         # 写入日志
         with open(log_file, 'a') as f:
@@ -837,16 +226,15 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader,
             f.write(f"  Total Loss:     {epoch_losses['total']:.6f}\n")
             f.write(f"  Recon X Loss:   {epoch_losses['recon_x']:.6f}\n")
             f.write(f"  Recon Adj Loss: {epoch_losses['recon_adj']:.6f}\n")
-            f.write(f"  Diversity Loss: {epoch_losses['diversity']:.6f}\n")
-            f.write(f"  Distribution Loss: {epoch_losses['distribution']:.6f}\n")
             f.write(f"  KL Loss:        {epoch_losses['kl']:.6f}\n")
             f.write(f"  Pred Loss:      {epoch_losses['pred']:.6f}\n")
+            # f.write(f"  FID Loss:       {epoch_losses['fid']:.6f}\n")
 
         # 保存最佳模型
         if epoch_losses['total'] < best_loss:
             best_loss = epoch_losses['total']
             best_epoch = epoch + 1
-            torch.save(model.state_dict(), f'param/myexplainer_subgraph_best.pt')
+            torch.save(model.state_dict(), f'param/myexplainer_{args.dataset}_best.pt')
             print(f"  *** Saved best model with loss {best_loss:.4f} ***")
 
             with open(log_file, 'a') as f:
@@ -857,7 +245,7 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader,
 
         # 定期保存checkpoint
         if (epoch + 1) % 10 == 0:
-            checkpoint_path = f'param/myexplainer_subgraph_epoch_{epoch + 1}.pt'
+            checkpoint_path = f'param/myexplainer_{args.dataset}_epoch_{epoch + 1}.pt'
             torch.save({
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
@@ -869,40 +257,40 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader,
             with open(log_file, 'a') as f:
                 f.write(f"  Checkpoint saved: {checkpoint_path}\n\n")
 
-            evaluation_metrics = evaluate(args, model, gnn, eval_loader)
-
-            print(
-                "  Validity ↑: {:.4f} (successful: {}/total: {})".format(
-                    evaluation_metrics["validity"],
-                    int(evaluation_metrics["successful"]),
-                    int(evaluation_metrics["total"]),
-                )
-            )
-            print(
-                "  Proximity ↓: {:.4f}".format(
-                    evaluation_metrics["proximity"]
-                )
-            )
-            print(
-                "  Fidelity+ ↑: {:.4f}".format(
-                    evaluation_metrics["fidelity+"]
-                )
-            )
-            print(
-                "  Fidelity- ↓: {:.4f}".format(
-                    evaluation_metrics["fidelity-"]
-                )
-            )
-            print(
-                "  Fidelity_prob ↑: {:.4f}".format(
-                    evaluation_metrics["fidelity"]
-                )
-            )
-            print(
-                "  Sparsity ↑: {:.4f}".format(
-                    evaluation_metrics["sparsity"]
-                )
-            )
+            # evaluation_metrics = evaluate(args, model, gnn, eval_loader)
+            #
+            # print(
+            #     "  Validity ↑: {:.4f} (successful: {}/total: {})".format(
+            #         evaluation_metrics["validity"],
+            #         int(evaluation_metrics["successful"]),
+            #         int(evaluation_metrics["total"]),
+            #     )
+            # )
+            # print(
+            #     "  Proximity ↓: {:.4f}".format(
+            #         evaluation_metrics["proximity"]
+            #     )
+            # )
+            # print(
+            #     "  Fidelity+ ↑: {:.4f}".format(
+            #         evaluation_metrics["fidelity+"]
+            #     )
+            # )
+            # print(
+            #     "  Fidelity- ↓: {:.4f}".format(
+            #         evaluation_metrics["fidelity-"]
+            #     )
+            # )
+            # print(
+            #     "  Fidelity_prob ↑: {:.4f}".format(
+            #         evaluation_metrics["fidelity"]
+            #     )
+            # )
+            # print(
+            #     "  Sparsity ↑: {:.4f}".format(
+            #         evaluation_metrics["sparsity"]
+            #     )
+            # )
 
     # 训练结束
     end_time = datetime.now()
@@ -927,7 +315,7 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader,
         f.write("=" * 80 + "\n")
 
     # 加载最佳模型
-    model.load_state_dict(torch.load(f'param/myexplainer_subgraph_best.pt'))
+    model.load_state_dict(torch.load(f'param/myexplainer_{args.dataset}_best.pt'))
     print("\nTraining completed! Loaded best model.")
     print(f"Best model from epoch {best_epoch} with loss {best_loss:.4f}")
     print(f"Training log saved to: {log_file}")
@@ -940,10 +328,9 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader,
     plt.plot(epochs_range, losses['total'], label='Total Loss', linewidth=2)
     plt.plot(epochs_range, losses['recon_x'], label='Recon X Loss')
     plt.plot(epochs_range, losses['recon_adj'], label='Recon Adj Loss')
-    # plt.plot(epochs_range, losses['diversity'], label='Diversity Loss')
-    # plt.plot(epochs_range, losses['distribution'], label='Distribution Loss')
     plt.plot(epochs_range, losses['kl'], label='KL Loss')
     plt.plot(epochs_range, losses['pred'], label='Pred Loss')
+    # plt.plot(epochs_range, losses['fid'], label='FID Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.title('Training Loss Curves')
@@ -956,3 +343,628 @@ def train_myexplainer_with_subgraph(args, model, gnn, train_loader, eval_loader,
     print(f"Loss curves saved to: {loss_plot_path}")
 
     return model, losses
+
+def train_myexplainer_with_causality(args, model, gnn, train_loader, eval_loader, optimizer, epochs=200, log_dir='logs'):
+    """
+    使用频繁子图掩码训练MyExplainer模型
+
+    训练流程:
+    1. 对每个图，提取掩码指定的子图部分（若无掩码则使用全图）
+    2. 将子图送入VGAE进行重构
+    3. 将重构的子图拼回到原图中，形成完整的反事实图
+    4. 计算损失：重构损失 + KL散度 + 预测损失
+
+    参数:
+        args: 参数对象
+        model: MyExplainer模型
+        gnn: 预训练的GNN分类器
+        train_loader: GraphTrainData的DataLoader (使用train_collate_fn)
+        optimizer: 优化器
+        epochs: 训练轮数
+        log_dir: 日志保存目录
+
+    返回:
+        model: 训练好的模型
+        losses: 损失历史字典
+    """
+
+    # 创建日志目录
+    os.makedirs(log_dir, exist_ok=True)
+
+    # 生成带时间戳的日志文件名
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"train_subgraph_{timestamp}.txt")
+
+    # 写入日志头部
+    with open(log_file, 'w') as f:
+        f.write("=" * 80 + "\n")
+        f.write("MyExplainer Subgraph Training Log\n")
+        f.write("=" * 80 + "\n")
+        f.write(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+        # 记录超参数
+        f.write("-" * 80 + "\n")
+        f.write("Hyperparameters:\n")
+        f.write("-" * 80 + "\n")
+        args_dict = vars(args)
+        for key in sorted(args_dict.keys()):
+            value = args_dict[key]
+            if key == 'device':
+                f.write(f"  {key}: {str(value)}\n")
+            else:
+                f.write(f"  {key}: {value}\n")
+        f.write("\n")
+
+        f.write("-" * 80 + "\n")
+        f.write("Training Configuration:\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"  Total Epochs: {epochs}\n")
+        f.write(f"  Max Num Nodes: {args.max_num_nodes}\n")
+        f.write(f"  Optimizer: {type(optimizer).__name__}\n")
+        f.write(f"  Learning Rate: {optimizer.param_groups[0]['lr']}\n")
+        f.write(f"  Weight Decay: {optimizer.param_groups[0]['weight_decay']}\n")
+        #将损失函数的权重写入日志
+        f.write(f"  Loss Weights: {args.loss_proportion}\n")
+        f.write("\n")
+
+        f.write("=" * 80 + "\n")
+        f.write("Training Progress:\n")
+        f.write("=" * 80 + "\n\n")
+
+    print(f"Training with subgraph masks, max_num_nodes={args.max_num_nodes}")
+    print(f"Log file: {log_file}")
+
+    # 记录损失历史
+    losses = {
+        'total': [],
+        'recon_x': [],
+        'recon_adj': [],
+        'kl': [],
+        'pred': [],
+        # 'ortho': [],
+    }
+
+    best_loss = float('inf')
+    best_epoch = 0
+
+    # 可视化配置：选择训练集中第一个batch的第一个图作为示例图，并在每个epoch结束时可视化其变换
+    viz_enabled = False  # 可切换是否启用可视化
+    viz_dir = os.path.join(log_dir, 'visualizations')
+    os.makedirs(viz_dir, exist_ok=True)
+
+    device = args.device
+
+    for epoch in range(epochs):
+        model.train()
+        gnn.eval()
+        epoch_losses = {
+            'total': 0.0,
+            'recon_x': 0.0,
+            'recon_adj': 0.0,
+            'kl': 0.0,
+            'pred': 0.0,
+            # 'ortho': 0.0,
+        }
+
+        num_batches = 0
+        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch + 1}/{epochs}')
+
+
+        for batch_idx, batch in enumerate(progress_bar):
+            # 1. 准备数据
+            graphs_batch = batch['graphs'].to(args.device)
+            subgraphs_batch = batch['subgraphs'].to(args.device)
+
+
+            # 2. 使用GNN获取原始预测
+            with torch.no_grad():
+                ori_pred_logits = gnn.get_pred(graphs_batch.x, graphs_batch.edge_index, graphs_batch.batch)[0]
+                ori_pred = ori_pred_logits.argmax(dim=1)  # (batch_size,)
+
+            # 3. 反事实标签：翻转预测
+            cf_pred = 1 - ori_pred
+            y_cf = cf_pred.float().unsqueeze(1)
+            y = ori_pred.float().unsqueeze(1)
+
+            # 4. 处理每个图：提取子图 -> 准备批量数据
+            optimizer.zero_grad()
+
+
+
+            # 第一步：提取批量信息
+            # 使用 to_dense_batch 将 [total_nodes, F] 转换为 [batch_size, max_num_nodes, F]
+            all_graph_x, _ = to_dense_batch(graphs_batch.x, graphs_batch.batch, max_num_nodes=args.max_num_nodes)
+            all_graph_x = all_graph_x.to(device)  # [batch_size, max_num_nodes, x_dim]
+
+            # 将邻接矩阵转换为密集格式 [batch_size, max_num_nodes, max_num_nodes]
+            all_graph_adj = to_dense_adj(graphs_batch.edge_index, graphs_batch.batch, max_num_nodes=args.max_num_nodes).to(device)
+
+            # 提取子图数据
+            all_subgraph_x, all_subgraph_adj, _ = core_data_from_batch(args, batch)
+
+            if args.edge_attr_dim != 0:
+                # 如果有边特征，使用 to_dense_adj 的 edge_attr 参数
+                all_graph_edge_attr = to_dense_adj(
+                    graphs_batch.edge_index,
+                    graphs_batch.batch,
+                    edge_attr=graphs_batch.edge_attr,
+                    max_num_nodes=args.max_num_nodes
+                ).to(device)
+
+                outputs = model(
+                    x=all_graph_x,
+                    adj=all_graph_adj,
+                    y_cf=y_cf,
+                    edge_attr=all_graph_edge_attr,
+                    # x_sub=all_subgraph_x,
+                    # adj_sub=all_subgraph_adj
+                )
+            else:
+                outputs = model(
+                    x=all_graph_x,
+                    adj=all_graph_adj,
+                    y_cf=y_cf,
+                    # x_sub=all_subgraph_x,
+                    # adj_sub=all_subgraph_adj
+                )
+
+
+            args.tmp = False
+            # 第二步：使用批量输出结果中的每一个重构图
+            output_graphs_batch = process_outputs(args, outputs)
+            if batch_idx == 0:
+                for i in range(3,4):
+                    graph = output_graphs_batch.get_example(i)
+                    # print(graph)
+                    # print(graph.x)
+                    # print(graph.edge_index)
+                    G = to_networkx(graph).to_undirected()
+                    pos = nx.spring_layout(G)
+                    plt.title(f"图{i}")
+                    nx.draw(G, pos, with_labels=True, node_color='lightgreen',node_size=50, font_size=10, font_weight='bold')
+
+                    plt.show()
+                    args.tmp = True
+
+            # 5. 计算损失
+            batch_losses = compute_loss_causality(args, outputs, batch, gnn, y_cf, output_graphs_batch)
+
+            # 提取总损失用于反向传播
+            total_loss = batch_losses['total']
+
+            # 6. 反向传播
+            total_loss.backward()
+
+            # 7. 梯度裁剪（可选，防止梯度爆炸）
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+            # 8. 优化器更新参数
+            optimizer.step()
+
+            # 9. 累积损失到epoch_losses
+            epoch_losses['total'] += batch_losses['total'].item()
+            epoch_losses['recon_x'] += batch_losses['recon_x'].item()
+            epoch_losses['recon_adj'] += batch_losses['recon_adj'].item()
+            epoch_losses['kl'] += batch_losses['kl'].item()
+            epoch_losses['pred'] += batch_losses['pred'].item()
+            # epoch_losses['ortho'] += batch_losses['ortho'].item()
+            num_batches += 1
+
+            # 更新进度条
+            progress_bar.set_postfix({
+                'loss': f'{total_loss.item():.4f}',
+                'recon_x': f'{batch_losses["recon_x"].item():.4f}',
+                'recon_adj': f'{batch_losses["recon_adj"].item():.4f}',
+                'kl': f'{batch_losses["kl"].item():.4f}',
+                'pred': f'{batch_losses["pred"].item():.4f}',
+                # 'ortho': f'{batch_losses["ortho"]:.4f}',
+            })
+
+        # 计算epoch平均损失
+        for key in epoch_losses:
+            epoch_losses[key] /= num_batches
+            losses[key].append(epoch_losses[key])
+
+        # 可视化：每个epoch结束时，绘制示例图的原始和重构版本
+
+        # 打印epoch总结
+        print(f"\nEpoch {epoch + 1}/{epochs} Summary:")
+        print(f"  Total Loss: {epoch_losses['total']:.4f}")
+        print(f"  Recon X Loss: {epoch_losses['recon_x']:.4f}")
+        print(f"  Recon Adj Loss: {epoch_losses['recon_adj']:.4f}")
+        print(f"  KL Loss: {epoch_losses['kl']:.4f}")
+        print(f"  Pred Loss: {epoch_losses['pred']:.4f}")
+        # print(f"  FID Loss: {epoch_losses['fid']:.4f}")
+        # print(f"  Ortho Loss: {epoch_losses['ortho']:.4f}")
+
+        # 写入日志
+        with open(log_file, 'a') as f:
+            f.write(f"Epoch {epoch + 1}/{epochs}:\n")
+            f.write(f"  Total Loss:     {epoch_losses['total']:.6f}\n")
+            f.write(f"  Recon X Loss:   {epoch_losses['recon_x']:.6f}\n")
+            f.write(f"  Recon Adj Loss: {epoch_losses['recon_adj']:.6f}\n")
+            f.write(f"  KL Loss:        {epoch_losses['kl']:.6f}\n")
+            f.write(f"  Pred Loss:      {epoch_losses['pred']:.6f}\n")
+            # f.write(f"  FID Loss:       {epoch_losses['fid']:.6f}\n")
+            # f.write(f"  Ortho Loss:     {epoch_losses['ortho']:.6f}\n")
+
+        # 保存最佳模型
+        if epoch_losses['total'] < best_loss:
+            best_loss = epoch_losses['total']
+            best_epoch = epoch + 1
+            torch.save(model.state_dict(), f'param/myexplainer_{args.dataset}_best.pt')
+            print(f"  *** Saved best model with loss {best_loss:.4f} ***")
+
+            with open(log_file, 'a') as f:
+                f.write(f"  >>> Best model saved! (loss: {best_loss:.6f})\n")
+
+        with open(log_file, 'a') as f:
+            f.write("\n")
+
+        # 定期保存checkpoint
+        if (epoch + 1) % 10 == 0:
+            checkpoint_path = f'param/myexplainer_{args.dataset}_epoch_{epoch + 1}.pt'
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': epoch_losses['total'],
+            }, checkpoint_path)
+            print(f"  Checkpoint saved to {checkpoint_path}")
+
+            with open(log_file, 'a') as f:
+                f.write(f"  Checkpoint saved: {checkpoint_path}\n\n")
+
+            # evaluation_metrics = evaluate(args, model, gnn, eval_loader)
+            #
+            # print(
+            #     "  Validity ↑: {:.4f} (successful: {}/total: {})".format(
+            #         evaluation_metrics["validity"],
+            #         int(evaluation_metrics["successful"]),
+            #         int(evaluation_metrics["total"]),
+            #     )
+            # )
+            # print(
+            #     "  Proximity ↓: {:.4f}".format(
+            #         evaluation_metrics["proximity"]
+            #     )
+            # )
+            # print(
+            #     "  Fidelity+ ↑: {:.4f}".format(
+            #         evaluation_metrics["fidelity+"]
+            #     )
+            # )
+            # print(
+            #     "  Fidelity- ↓: {:.4f}".format(
+            #         evaluation_metrics["fidelity-"]
+            #     )
+            # )
+            # print(
+            #     "  Fidelity_prob ↑: {:.4f}".format(
+            #         evaluation_metrics["fidelity"]
+            #     )
+            # )
+            # print(
+            #     "  Sparsity ↑: {:.4f}".format(
+            #         evaluation_metrics["sparsity"]
+            #     )
+            # )
+
+    # 训练结束
+    end_time = datetime.now()
+
+    with open(log_file, 'a') as f:
+        f.write("\n")
+        f.write("=" * 80 + "\n")
+        f.write("Training Summary:\n")
+        f.write("=" * 80 + "\n")
+        f.write(f"End Time: {end_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Total Epochs: {epochs}\n")
+        f.write(f"Best Epoch: {best_epoch}\n")
+        f.write(f"Best Loss: {best_loss:.6f}\n")
+        f.write("\n")
+        f.write("Final Loss Values:\n")
+        f.write(f"  Total Loss:     {losses['total'][-1]:.6f}\n")
+        f.write(f"  Recon X Loss:   {losses['recon_x'][-1]:.6f}\n")
+        f.write(f"  Recon Adj Loss: {losses['recon_adj'][-1]:.6f}\n")
+        f.write(f"  KL Loss:        {losses['kl'][-1]:.6f}\n")
+        f.write(f"  Pred Loss:      {losses['pred'][-1]:.6f}\n")
+        f.write("\n")
+        f.write("=" * 80 + "\n")
+
+    # 加载最佳模型
+    model.load_state_dict(torch.load(f'param/myexplainer_{args.dataset}_best.pt'))
+    print("\nTraining completed! Loaded best model.")
+    print(f"Best model from epoch {best_epoch} with loss {best_loss:.4f}")
+    print(f"Training log saved to: {log_file}")
+    if viz_enabled:
+        print(f"Visualizations saved to: {viz_dir}")
+
+    # 绘制损失曲线
+    epochs_range = range(1, epochs + 1)
+    plt.figure(figsize=(12, 8))
+    plt.plot(epochs_range, losses['total'], label='Total Loss', linewidth=2)
+    plt.plot(epochs_range, losses['recon_x'], label='Recon X Loss')
+    plt.plot(epochs_range, losses['recon_adj'], label='Recon Adj Loss')
+    plt.plot(epochs_range, losses['kl'], label='KL Loss')
+    plt.plot(epochs_range, losses['pred'], label='Pred Loss')
+    # plt.plot(epochs_range, losses['fid'], label='FID Loss')
+    # plt.plot(epochs_range, losses['ortho'], label='Ortho Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training Loss Curves')
+    plt.legend()
+    plt.grid(True)
+    loss_plot_path = os.path.join(log_dir, f"loss_curves_{timestamp}.png")
+    plt.savefig(loss_plot_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    plt.close()
+    print(f"Loss curves saved to: {loss_plot_path}")
+
+    return model, losses
+
+
+
+
+
+def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, epochs=30):
+    # 记录损失历史
+    losses = {
+        'total': [],
+        'recon': [],
+        'mask': [],
+        'edit_inside': [],
+        'edit_outside': [],
+        'cf': [],
+        'kl': [],
+    }
+
+    best_loss = float('inf')
+    best_epoch = 0
+
+
+    y_desired_cache = []
+    gnn.eval()
+    with torch.no_grad():
+        for batch in train_loader:
+            origraphs = batch['graphs'].to(args.device)
+            ori_pred_logits, _ = gnn.get_pred(origraphs.x, origraphs.edge_index, origraphs.batch)
+            ori_pred = ori_pred_logits.argmax(dim=1)
+            y_desired = (1 - ori_pred).float().unsqueeze(1)
+            y_desired_cache.append(y_desired.cpu())
+
+    for epoch in range(epochs):
+        model.train()
+        gnn.eval()
+        epoch_losses = {
+            'total': 0.0,
+            'recon': 0.0,
+            'mask': 0.0,
+            'edit_inside': 0.0,
+            'edit_outside': 0.0,
+            'cf': 0.0,
+            'kl': 0.0,
+        }
+
+        num_batches = 0
+        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch + 1}/{epochs}')
+
+        for batch_idx, batch in enumerate(progress_bar):
+
+            origraphs = batch['graphs'].to(args.device)
+            subgraphs = [g.to(args.device) for g in batch['subgraphs']]
+
+            x = origraphs.x
+            edge_index = origraphs.edge_index
+            batch_vec = origraphs.batch
+
+            # ✅ 使用预计算的y_desired，确保每个epoch一致
+            y_desired = y_desired_cache[batch_idx].to(args.device)
+            y_hat = (1 - y_desired).float()  # 原始预测 = 1 - 反事实标签
+
+
+            # 4. 处理每个图：提取子图 -> 准备批量数据
+            optimizer.zero_grad()
+
+            # outputs = model(
+            #     x=x,
+            #     edge_index=edge_index,
+            #     batch=batch_vec,
+            #     y_desired=y_desired.view(-1, 1),
+            #     edge_attr=getattr(origraphs, 'edge_attr', None)
+            # )
+            outputs = model(origraphs, subgraphs)
+            loss_dict = model.compute_loss(args, origraphs, y_desired, outputs)
+
+            if batch_idx in [0,1,2,3,4]:
+                visualize_explainer_graph(origraphs, y_desired, outputs)
+
+
+
+            # loss_dict = model.compute_loss(args, origraphs, subgraphs, gnn, y_desired, outputs)
+
+
+            loss = loss_dict["total"]
+
+
+
+            loss.backward()
+
+            # for name, param in model.named_parameters():
+            #     if param.grad is not None:
+            #         grad_norm = param.grad.norm().item()
+            #         print(f"{name}: grad_norm = {grad_norm:.6f}")
+            #
+            # total_norm = 0.0
+            # for p in model.parameters():
+            #     if p.grad is not None:
+            #         param_norm = p.grad.data.norm(2)
+            #         total_norm += param_norm.item() ** 2
+            # total_norm = total_norm ** 0.5
+            # print(f"Total gradient norm: {total_norm:.4f}")
+
+            # 7. 梯度裁剪（可选，防止梯度爆炸）
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+            # 8. 优化器更新参数
+            optimizer.step()
+
+            # 9. 累积损失到epoch_losses
+            total_loss = loss_dict["total"]
+            for key in loss_dict:
+                epoch_losses[key] += loss_dict[key].item()
+            num_batches += 1
+
+            # 更新进度条
+            progress_bar.set_postfix({
+                'loss': f'{total_loss.item():.4f}',
+                # 'recon': f'{loss_dict["recon"]:.4f}',
+                # 'mask': f'{loss_dict["mask"]:.4f}',
+                # 'edit_inside': f'{loss_dict["edit_inside"]:.4f}',
+                # 'edit_outside': f'{loss_dict["edit_outside"]:.4f}',
+                'cf': f'{loss_dict["cf"]:.4f}',
+                # 'kl': f'{loss_dict["kl"]:.4f}',
+            })
+
+        # 计算epoch平均损失
+        for key in epoch_losses:
+            epoch_losses[key] /= num_batches
+            losses[key].append(epoch_losses[key])
+
+        # 可视化：每个epoch结束时，绘制示例图的原始和重构版本
+
+        # 打印epoch总结
+        print(f"\nEpoch {epoch + 1}/{epochs} Summary:")
+        for loss_name, loss_value in epoch_losses.items():
+            # Skip the mask loss if it's commented out in the original
+            if loss_name != 'mask':
+                print(f"  {loss_name.replace('_', ' ').title()} Loss: {loss_value:.4f}")
+
+
+        # 保存最佳模型
+        if epoch_losses['total'] < best_loss:
+            best_loss = epoch_losses['total']
+            best_epoch = epoch + 1
+            torch.save(model.state_dict(), f'param/myexplainer_{args.dataset}_best.pt')
+            print(f"  *** Saved best model with loss {best_loss:.4f} ***")
+
+
+        # 定期保存checkpoint
+        if (epoch + 1) % 10 == 0:
+            checkpoint_path = f'param/myexplainer_{args.dataset}_epoch_{epoch + 1}.pt'
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': epoch_losses['total'],
+            }, checkpoint_path)
+            print(f"  Checkpoint saved to {checkpoint_path}")
+
+
+    # 加载最佳模型
+    model.load_state_dict(torch.load(f'param/myexplainer_{args.dataset}_best.pt'))
+    print("\nTraining completed! Loaded best model.")
+    print(f"Best model from epoch {best_epoch} with loss {best_loss:.4f}")
+
+    # 绘制损失曲线
+    # epochs_range = range(1, epochs + 1)
+    # plt.figure(figsize=(12, 8))
+    # plt.plot(epochs_range, losses['total'], label='Total Loss', linewidth=2)
+    # plt.plot(epochs_range, losses['recon'], label='Recon Loss')
+    # plt.plot(epochs_range, losses['kl'], label='KL Loss')
+    # plt.plot(epochs_range, losses['cf'], label='cf Loss')
+    # plt.plot(epochs_range, losses['mask'], label='mask Loss')
+    # plt.plot(epochs_range, losses['edit_inside'], label='edit_inside Loss')
+    # plt.plot(epochs_range, losses['edit_outside'], label='edit_outside Loss')
+    #
+    #
+    # plt.xlabel('Epoch')
+    # plt.ylabel('Loss')
+    # plt.title('Training Loss Curves')
+    # plt.legend()
+    # plt.grid(True)
+    # plt.show()
+    # plt.close()
+
+    epochs_range = range(1, epochs + 1)
+    loss_types = ['total', 'recon', 'kl', 'cf', 'edit_inside', 'edit_outside']
+
+    for loss_type in loss_types:
+        plt.figure(figsize=(10, 6))
+        plt.plot(epochs_range, losses[loss_type], linewidth=2, color='blue')
+        plt.xlabel('Epoch')
+        plt.ylabel(f'{loss_type.capitalize()} Loss')
+        plt.title(f'Training {loss_type.capitalize()} Loss Curve')
+        plt.grid(True)
+        plt.show()
+        plt.close()
+        formatted_string = ", ".join(f"{x:.2f}" for x in losses[loss_type])
+        print(f"{loss_type}: [{formatted_string}]")
+
+    return model, losses
+
+
+def scale_losses_by_grad_norm(
+    losses: Dict[str, torch.Tensor],
+    model: nn.Module
+) -> Dict[str, torch.Tensor]:
+    """
+    根据每个损失项的梯度范数对损失进行比例缩放。
+
+    参数:
+        losses (dict[str, torch.Tensor]): 包含多个损失项的字典，
+            形如 {"loss1": loss1, "loss2": loss2, ...}。
+        model (torch.nn.Module): 用于计算梯度的模型。
+
+    返回:
+        dict[str, torch.Tensor]: 缩放后的损失项字典。
+    """
+    # 只取需要梯度的参数
+    params = [p for p in model.parameters() if p.requires_grad]
+    if len(params) == 0:
+        raise ValueError("model 没有任何 requires_grad=True 的参数，无法计算梯度范数。")
+
+    grad_norms: Dict[str, torch.Tensor] = {}
+
+    # 1. 计算每个 loss 相对于模型参数的梯度范数
+    for name, loss in losses.items():
+        if name == 'total':
+            continue
+
+        if not isinstance(loss, torch.Tensor):
+            raise TypeError(f"losses['{name}'] 不是 torch.Tensor。")
+
+        if loss.grad_fn is None:
+            # 一般说明 loss 被 .item() 过，或者在 no_grad() 环境里
+            raise RuntimeError(f"losses['{name}'] 无 grad_fn，无法求梯度。")
+
+        # autograd.grad 不会把梯度写入 param.grad，副作用更小
+        grads = torch.autograd.grad(
+            loss,
+            params,
+            retain_graph=True,   # 多个 loss 共用计算图时需要保留
+            allow_unused=True
+        )
+
+        # 计算二范数
+        total_sq = torch.zeros([], device=loss.device)
+        for g in grads:
+            if g is not None:
+                total_sq = total_sq + g.pow(2).sum()
+
+        grad_norm = torch.sqrt(total_sq + 1e-12)
+        grad_norms[name] = grad_norm
+
+    # 2. 根据梯度范数计算缩放系数
+    # 这里采用“梯度大的 loss 权重更小”的方式来平衡各项：
+    #   weight_i = mean_norm / grad_norm_i
+    norms = torch.stack(list(grad_norms.values()))
+    mean_norm = norms.mean()
+
+    scaled_losses: Dict[str, torch.Tensor] = {}
+    for name, loss in losses.items():
+        gn = grad_norms[name]
+        weight = mean_norm / (gn + 1e-12)   # 梯度大 → weight 小
+        scaled_losses[name] = loss * weight
+
+    return scaled_losses

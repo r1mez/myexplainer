@@ -9,15 +9,18 @@ from typing import Dict, Tuple
 
 import numpy as np
 import torch
+from networkx.classes import subgraph
 from scipy.sparse import coo_matrix
 from torch_geometric.utils import to_dense_adj, to_dense_batch
 from torch_geometric.data import Batch, Data
 from tqdm import tqdm
 
 from utils import concat_graphs
-from utils.batch_utils import core_data_from_batch
+from utils.batch_utils import core_data_from_batch, output_to_batch
 from utils.graph_utils import extract_explanatory_subgraph, exclude_explanatory_subgraph
 import torch.nn.functional as F
+
+from utils.vis_utils import visualize_explainer_graph
 
 
 def evaluate(args, model, gnn, data_loader):
@@ -25,8 +28,19 @@ def evaluate(args, model, gnn, data_loader):
     gnn.eval()
     args.train_mode = False
 
+
+    y_desired_all = []
+    ori_prob_all = []
+    with torch.no_grad():
+        for batch in data_loader:
+            origraphs = batch['graphs'].to(args.device)
+            _, ori_pred_logits = gnn.get_pred(origraphs.x, origraphs.edge_index, origraphs.batch)
+            ori_prob = F.softmax(ori_pred_logits, dim=1)
+            ori_pred = ori_pred_logits.argmax(dim=1)
+            y_desired = (1 - ori_pred).float().unsqueeze(1)
+            y_desired_all.append(y_desired.cpu())
+            ori_prob_all.append(ori_prob.cpu())
     device = args.device
-    max_sub_nodes = args.max_subgraph_nodes
 
     proximity = 0.0
     valid_cf = 0
@@ -37,70 +51,77 @@ def evaluate(args, model, gnn, data_loader):
 
 
     total = data_loader.dataset.__len__()
-    total_0 = 0
-    total_1 = 0
     num_batches = 0  # 添加batch计数
-    robust_fidelity = {"prob":{"f+":[], "f-":[], "delta":[]},"acc":{"f+":[], "f-":[], "delta":[]}}
+    # robust_fidelity = {"prob":{"f+":[], "f-":[], "delta":[]},"acc":{"f+":[], "f-":[], "delta":[]}}
 
     with torch.no_grad():
-        for batch in tqdm(data_loader, desc="Evaluating:"):
-            graphs_batch = batch["graphs"].to(device)
-            subgraphs_batch = batch["subgraphs"]
-            batch["graphs"] = graphs_batch
-            # batch["subgraphs"] = subgraphs_batch
+        for batch_idx, batch in enumerate(tqdm(data_loader, desc="Evaluating:")):
+            origraphs = batch['graphs'].to(args.device)
+            subgraphs = batch['subgraphs']
 
-            batch_size = graphs_batch.num_graphs
-            if batch_size == 0:
-                continue
+            x = origraphs.x
+            edge_index = origraphs.edge_index
+            batch_vec = origraphs.batch
 
-            ori_pred_logits = gnn.get_pred(
-                graphs_batch.x, graphs_batch.edge_index, graphs_batch.batch
-            )[0]
-            ori_prob = F.softmax(ori_pred_logits, dim=1)
-            ori_pred = ori_pred_logits.argmax(dim=1)
-            # 计算有多少个0类样本
-            total_0 += (ori_pred == 0).sum().item()
-            total_1 += (ori_pred == 1).sum().item()
-
-            cf_pred = 1 - ori_pred
-            y_cf = cf_pred.float().unsqueeze(1)
-            if args.edge_attr_dim != 0:
-                subgraph_x, subgraph_adj, subgraph_edge_attr = core_data_from_batch(args, batch)
-                outputs = model(x=subgraph_x, adj=subgraph_adj, y_cf=y_cf, edge_attr=subgraph_edge_attr)
-            else:
-                subgraph_x, subgraph_adj, _ = core_data_from_batch(args, batch)
-                outputs = model(x=subgraph_x, adj=subgraph_adj, y_cf=y_cf)
+            # ✅ 使用预计算的y_desired，确保每个epoch一致
+            y_desired = y_desired_all[batch_idx].to(args.device)
+            y_hat = (1 - y_desired).float()  # 原始预测 = 1 - 反事实标签
 
 
+            outputs = model(
+                graphs=origraphs,
+                subgraphs=subgraphs
+            )
 
-            concated_graphs = concat_graphs(args, outputs, batch)
+            visualize_explainer_graph(origraphs, y_desired, outputs)
 
-            valid_cf += count_valid(cf_pred, concated_graphs, gnn)
-            proximity += compute_proximity(args, concated_graphs, graphs_batch)
-            fidel_plus, fidel_minus = compute_fidelity(args, graphs_batch, concated_graphs, ori_pred, gnn)
-            fidel_sum += compute_fidelity_prob(args, graphs_batch, concated_graphs, ori_prob, gnn)
-            sparsity_sum += compute_sparsity(args, graphs_batch, concated_graphs)
+            cf_graphs = output_to_batch(origraphs, outputs)
+
+            # 🔍 调试：在第一个batch打印统计信息
+            if batch_idx == 0:
+                ori_graphs_list = origraphs.to_data_list()
+                cf_graphs_list = cf_graphs.to_data_list()
+                exp_graphs_list = [extract_explanatory_subgraph(o, c) for o, c in zip(ori_graphs_list, cf_graphs_list)]
+
+                print(f"\n[DEBUG] Batch {batch_idx} - First 3 graphs:")
+                for i in range(min(3, len(ori_graphs_list))):
+                    ori_edges = ori_graphs_list[i].num_edges
+                    cf_edges = cf_graphs_list[i].num_edges
+                    exp_edges = exp_graphs_list[i].num_edges
+                    print(f"  Graph {i}: ori_edges={ori_edges}, cf_edges={cf_edges}, exp_edges={exp_edges}")
+                    print(f"            sparsity = 1 - ({exp_edges}/{ori_edges}) = {1 - exp_edges/ori_edges:.4f}")
+
+                # 打印adj_recon的统计信息
+                # adj_recon = outputs['adj_recon']
+                # print(f"\n  adj_recon stats: min={adj_recon.min():.4f}, max={adj_recon.max():.4f}, mean={adj_recon.mean():.4f}")
+                # print(f"  adj_recon > 0.5: {(adj_recon > 0.5).sum().item()} / {adj_recon.numel()} = {(adj_recon > 0.5).float().mean():.4f}")
+
+            valid_cf += count_valid(y_desired, cf_graphs, gnn)
+            proximity += compute_proximity(args, cf_graphs, origraphs)
+            fidel_plus, fidel_minus = compute_fidelity(args, origraphs, cf_graphs, y_hat, gnn)
+            fidel_sum += compute_fidelity_prob(args, origraphs, cf_graphs, ori_prob_all[batch_idx], gnn)
+            sparsity_sum += compute_sparsity(args, origraphs, cf_graphs)
             fidel_plus_count += fidel_plus
             fidel_minus_count += fidel_minus
 
-            fid_plus_prob, fid_minus_prob, fid_delta_prob, \
-                fid_plus_acc, fid_minus_acc, fid_delta_acc = compute_robust_fidelity(
-                args=args,
-                ori_graphs=graphs_batch,
-                cf_graphs=concated_graphs,
-                ori_pred=ori_pred,
-                gnn=gnn,
-                alpha1=0.1,  # 移除10%的解释边
-                alpha2=0.9,  # 保留90%的非解释边
-                sample_num=50,  # 采样50次
-                undirect=True  # 无向图
-            )
-            robust_fidelity["prob"]["f+"].append(fid_plus_prob)
-            robust_fidelity["prob"]["f-"].append(fid_minus_prob)
-            robust_fidelity["prob"]["delta"].append(fid_delta_prob)
-            robust_fidelity["acc"]["f+"].append(fid_plus_acc)
-            robust_fidelity["acc"]["f-"].append(fid_minus_acc)
-            robust_fidelity["acc"]["delta"].append(fid_delta_acc)
+            # fid_plus_prob, fid_minus_prob, fid_delta_prob, \
+            #     fid_plus_acc, fid_minus_acc, fid_delta_acc = compute_robust_fidelity(
+            #     args=args,
+            #     ori_graphs=origraphs,
+            #     cf_graphs=cf_graphs,
+            #     ori_pred=y_hat,
+            #     gnn=gnn,
+            #     alpha1=0.1,  # 移除10%的解释边
+            #     alpha2=0.9,  # 保留90%的非解释边
+            #     sample_num=50,  # 采样50次
+            #     undirect=True  # 无向图
+            # )
+            # robust_fidelity["prob"]["f+"].append(fid_plus_prob)
+            # robust_fidelity["prob"]["f-"].append(fid_minus_prob)
+            # robust_fidelity["prob"]["delta"].append(fid_delta_prob)
+            # robust_fidelity["acc"]["f+"].append(fid_plus_acc)
+            # robust_fidelity["acc"]["f-"].append(fid_minus_acc)
+            # robust_fidelity["acc"]["delta"].append(fid_delta_acc)
 
 
             num_batches += 1
@@ -112,12 +133,12 @@ def evaluate(args, model, gnn, data_loader):
     fidelity_minus = fidel_minus_count / total if total > 0 else 0.0
     fidelity = fidel_sum / total if total > 0 else 0.0
 
-    ro_fid_prob_plus = np.mean(robust_fidelity["prob"]["f+"])
-    ro_fid_prob_minus = np.mean(robust_fidelity["prob"]["f-"])
-    ro_fid_prob_delta = np.mean(robust_fidelity["prob"]["delta"])
-    ro_fid_acc_plus = np.mean(robust_fidelity["acc"]["f+"])
-    ro_fid_acc_minus = np.mean(robust_fidelity["acc"]["f-"])
-    ro_fid_acc_delta = np.mean(robust_fidelity["acc"]["delta"])
+    # ro_fid_prob_plus = np.mean(robust_fidelity["prob"]["f+"])
+    # ro_fid_prob_minus = np.mean(robust_fidelity["prob"]["f-"])
+    # ro_fid_prob_delta = np.mean(robust_fidelity["prob"]["delta"])
+    # ro_fid_acc_plus = np.mean(robust_fidelity["acc"]["f+"])
+    # ro_fid_acc_minus = np.mean(robust_fidelity["acc"]["f-"])
+    # ro_fid_acc_delta = np.mean(robust_fidelity["acc"]["delta"])
 
 
 
@@ -132,12 +153,12 @@ def evaluate(args, model, gnn, data_loader):
         "fidelity": fidelity,
         "sparsity": sparsity,
 
-        "ro_fid_prob_plus": ro_fid_prob_plus,
-        "ro_fid_prob_minus": ro_fid_prob_minus,
-        "ro_fid_prob_delta": ro_fid_prob_delta,
-        "ro_fid_acc_plus": ro_fid_acc_plus,
-        "ro_fid_acc_minus": ro_fid_acc_minus,
-        "ro_fid_acc_delta": ro_fid_acc_delta,
+        # "ro_fid_prob_plus": ro_fid_prob_plus,
+        # "ro_fid_prob_minus": ro_fid_prob_minus,
+        # "ro_fid_prob_delta": ro_fid_prob_delta,
+        # "ro_fid_acc_plus": ro_fid_acc_plus,
+        # "ro_fid_acc_minus": ro_fid_acc_minus,
+        # "ro_fid_acc_delta": ro_fid_acc_delta,
 
 
         "successful": valid_cf,
@@ -149,86 +170,100 @@ def count_valid(target_lables, cf_graphs, gnn):
     gnn.eval()
 
     pred_logits_cf = gnn.get_pred(cf_graphs.x, cf_graphs.edge_index, cf_graphs.batch)[0]
-    pred_labels_cf = pred_logits_cf.argmax(dim=1)
+    print(pred_logits_cf)
+    pred_labels_cf = pred_logits_cf.argmax(dim=1).view(-1,1)
 
     flipped_lables = (pred_labels_cf == target_lables).sum().item()
 
     return flipped_lables
 
 def compute_proximity(args, cf_graphs, ori_graphs):
-    rho, beta, gamma = (1.0, 1.0, 0.0)
+    # 现在只用邻接矩阵距离，rho=1即可
+    rho = 1.0
 
     ori_graphs = ori_graphs.to_data_list()
     cf_graphs = cf_graphs.to_data_list()
     batch_size = len(ori_graphs)
     distances = torch.zeros(batch_size, device=args.device)
 
+    # 安全版本的 to_dense_adj，支持空 edge_index
+    def safe_to_dense_adj(data):
+        edge_index = data.edge_index
+
+        # 确定节点数：
+        # 1) 优先用 num_nodes
+        # 2) 再用 x.size(0)
+        # 3) 最后从 edge_index 推
+        if getattr(data, 'num_nodes', None) is not None and data.num_nodes is not None:
+            num_nodes = data.num_nodes
+        elif getattr(data, 'x', None) is not None and data.x is not None:
+            num_nodes = data.x.size(0)
+        else:
+            if edge_index.numel() == 0:
+                # 没任何信息，只能返回 0x0
+                return torch.zeros(0, 0, device=args.device)
+            num_nodes = int(edge_index.max().item()) + 1
+
+        # 确定 device
+        if edge_index.numel() > 0:
+            device = edge_index.device
+        elif getattr(data, 'x', None) is not None and data.x is not None:
+            device = data.x.device
+        else:
+            device = args.device
+
+        # 如果没有边：返回全 0 邻接矩阵 [num_nodes, num_nodes]
+        if edge_index.numel() == 0:
+            return torch.zeros(num_nodes, num_nodes, device=device)
+
+        # 正常情况：确保形状是 [num_nodes, num_nodes]
+        dense = to_dense_adj(edge_index, max_num_nodes=num_nodes).squeeze(0)
+        return dense
+
     for i in range(batch_size):
         orig_data = ori_graphs[i]
         cf_data = cf_graphs[i]
 
-        orig_adj = to_dense_adj(orig_data.edge_index, max_num_nodes=args.max_num_nodes).squeeze(0)
-        cf_adj = to_dense_adj(cf_data.edge_index, max_num_nodes=args.max_num_nodes).squeeze(0)
+        # 邻接矩阵（已经处理空图）
+        orig_adj = safe_to_dense_adj(orig_data)  # [n1, n1]
+        cf_adj = safe_to_dense_adj(cf_data)      # [n2, n2]
 
-        orig_node_feat = orig_data.x
-        cf_node_feat = cf_data.x
-        orig_edge_feat = orig_data.edge_attr if hasattr(orig_data, 'edge_attr') else None
-        cf_edge_feat = cf_data.edge_attr if hasattr(cf_data, 'edge_attr') else None
+        # 若节点数不同，做零填充对齐
+        n_orig, n_cf = orig_adj.size(0), cf_adj.size(0)
 
-        # 计算原始距离（用 sum 匹配总范数）
-        # d_adj = F.frobenius_norm(orig_adj - cf_adj)
+        # 邻接矩阵差异（Frobenius 范数）
         d_adj = torch.norm(orig_adj - cf_adj, p='fro')
-        d_node = F.mse_loss(orig_node_feat, cf_node_feat, reduction='sum')
-        d_edge = 0.0
-        if orig_edge_feat is not None and cf_edge_feat is not None:
-            # 假设 edge_attr 形状匹配（需 pad 如果 num_edges 不同）
-            min_edges = min(len(orig_edge_feat), len(cf_edge_feat))
-            d_edge = F.mse_loss(orig_edge_feat[:min_edges], cf_edge_feat[:min_edges], reduction='sum')
 
-        # 获取节点/边数
-        n_orig, n_cf = orig_node_feat.size(0), cf_node_feat.size(0)
-        m_orig = orig_data.num_edges // 2 if orig_data.is_undirected() else orig_data.num_edges  # 假设无向图
+        # 用边数归一化
+        m_orig = orig_data.num_edges // 2 if orig_data.is_undirected() else orig_data.num_edges
         m_cf = cf_data.num_edges // 2 if cf_data.is_undirected() else cf_data.num_edges
-
-        max_n = max(n_orig, n_cf)
         max_m = max(m_orig, m_cf)
 
-        # 归一化
         norm_d_adj = d_adj / max_m if max_m > 0 else 0.0
-        norm_d_node = d_node / max_n if max_n > 0 else 0.0
-        norm_d_edge = d_edge / max_m if max_m > 0 else 0.0
 
-        # 加权求和
-        distances[i] = rho * norm_d_adj + beta * norm_d_node + gamma * norm_d_edge
+        # 现在距离只由邻接矩阵决定
+        distances[i] = rho * norm_d_adj
 
     return distances.mean().item()
 
 
 def compute_fidelity(args, ori_graphs, cf_graphs, ori_pred, gnn):
-    """
-    计算fidelity+和fidelity-：
-    - fidelity+：保留解释子图时，预测与原始一致的比例（越高越好）；
-    - fidelity-：移除解释子图时，预测与原始一致的比例（越低越好）。
-
-    使用批量处理+索引映射的方式，既避免空图问题又保持高速度。
-    """
-    ori_graphs_list = ori_graphs.to_data_list()
-    cf_graphs_list = cf_graphs.to_data_list()
 
     fidel_plus_count = 0
     fidel_minus_count = 0
 
-    # 收集所有非空的解释子图和非解释子图，并记录它们对应的原始图索引
     exp_graphs_list = []
     exp_excluded_graphs_list = []
-    exp_graph_indices = []  # 记录解释子图对应的原始图索引
-    exp_excluded_indices = []  # 记录非解释子图对应的原始图索引
+    exp_graph_indices = []
+    exp_excluded_indices = []
+
+    ori_graphs_list = ori_graphs.to_data_list()
+    cf_graphs_list = cf_graphs.to_data_list()
 
     for i, (ori_graph, cf_graph) in enumerate(zip(ori_graphs_list, cf_graphs_list)):
         exp_graph = extract_explanatory_subgraph(ori_graph, cf_graph)
         exp_excluded_graph = exclude_explanatory_subgraph(ori_graph, cf_graph)
 
-        # 只添加非空图
         if exp_graph.num_nodes > 0:
             exp_graphs_list.append(exp_graph)
             exp_graph_indices.append(i)
@@ -237,61 +272,55 @@ def compute_fidelity(args, ori_graphs, cf_graphs, ori_pred, gnn):
             exp_excluded_graphs_list.append(exp_excluded_graph)
             exp_excluded_indices.append(i)
 
-    # 批量预测所有非空的解释子图
-    if len(exp_graphs_list) > 0:
-        exp_graphs_batch = Batch.from_data_list(exp_graphs_list).to(args.device)
-        exp_pred_logits = gnn.get_pred(
-            exp_graphs_batch.x, exp_graphs_batch.edge_index, exp_graphs_batch.batch
-        )[0]
-        exp_preds = exp_pred_logits.argmax(dim=1)
+    # fidelity+
+    if exp_graphs_list:
+        batch = Batch.from_data_list(exp_graphs_list).to(args.device)
+        pred = gnn.get_pred(batch.x, batch.edge_index, batch.batch)[0].argmax(dim=1)
 
-        # 根据索引映射计算fidelity+
-        for batch_idx, orig_idx in enumerate(exp_graph_indices):
-            ori_pred_i = ori_pred[orig_idx].item() if torch.is_tensor(ori_pred[orig_idx]) else ori_pred[orig_idx]
-            exp_pred = exp_preds[batch_idx].item()
-
-            if exp_pred == ori_pred_i:
+        for bi, ori_i in enumerate(exp_graph_indices):
+            if pred[bi].item() == int(ori_pred[ori_i]):
                 fidel_plus_count += 1
 
-    # 批量预测所有非空的非解释子图
-    if len(exp_excluded_graphs_list) > 0:
-        exp_excluded_batch = Batch.from_data_list(exp_excluded_graphs_list).to(args.device)
-        exp_excluded_logits = gnn.get_pred(
-            exp_excluded_batch.x, exp_excluded_batch.edge_index, exp_excluded_batch.batch
-        )[0]
-        exp_excluded_preds = exp_excluded_logits.argmax(dim=1)
+    # fidelity-
+    if exp_excluded_graphs_list:
+        batch = Batch.from_data_list(exp_excluded_graphs_list).to(args.device)
+        pred = gnn.get_pred(batch.x, batch.edge_index, batch.batch)[0].argmax(dim=1)
 
-        # 根据索引映射计算fidelity-
-        for batch_idx, orig_idx in enumerate(exp_excluded_indices):
-            ori_pred_i = ori_pred[orig_idx].item() if torch.is_tensor(ori_pred[orig_idx]) else ori_pred[orig_idx]
-            exp_excluded_pred = exp_excluded_preds[batch_idx].item()
-
-            if exp_excluded_pred == ori_pred_i:
+        for bi, ori_i in enumerate(exp_excluded_indices):
+            if pred[bi].item() == int(ori_pred[ori_i]):
                 fidel_minus_count += 1
 
     return fidel_plus_count, fidel_minus_count
 
 
 def compute_fidelity_prob(args, ori_graphs, cf_graphs, ori_prob, gnn):
-    ori_graphs, cf_graphs = ori_graphs.to_data_list(), cf_graphs.to_data_list()
-    # exp_graphs = [extract_explanatory_subgraph(ori, cf) for ori, cf in zip(ori_graphs, cf_graphs)]
-    exp_excluded_graphs = [exclude_explanatory_subgraph(ori, cf) for ori, cf in zip(ori_graphs, cf_graphs)]
+    """
+    计算将原始图替换为反事实图后，原始预测类别的概率下降值（保真度）。
 
-    excluded_graphs_batch = Batch.from_data_list(exp_excluded_graphs).to(args.device)
+    Args:
+        args: 包含 device 等配置的参数对象
+        ori_graphs: 原始图 Batch 对象
+        cf_graphs: 反事实图 Batch 对象（已修改的图）
+        ori_prob: 原始图的预测概率 [N, num_classes]
+        gnn: 图神经网络模型，需支持 get_pred(x, edge_index, batch)
 
+    Returns:
+        fidelity_sum: 所有样本上原始类别概率的下降总和
+    """
+    # 获取原始预测类别（每个图最可能的类别）
+    ori_pred = ori_prob.argmax(dim=1)  # shape: [N]
 
-    fidelity_sum = 0.00
-    ori_pred = ori_prob.argmax(dim=1)
+    # 在反事实图上进行预测
+    cf_pred_logits = gnn.get_pred(
+        cf_graphs.x, cf_graphs.edge_index, cf_graphs.batch
+    )[0]  # 假设返回 (logits, ...)
+    cf_prob = F.softmax(cf_pred_logits, dim=1)  # shape: [N, num_classes]
 
-    excluded_pred_logits = gnn.get_pred(
-        excluded_graphs_batch.x, excluded_graphs_batch.edge_index, excluded_graphs_batch.batch
-    )[0]
-    excluded_prob = F.softmax(excluded_pred_logits, dim=1)
-
+    fidelity_sum = 0.0
     for i in range(len(ori_pred)):
-        excluded_prob_single = excluded_prob[i, ori_pred[i]].item()
-        ori_prob_single = ori_prob[i, ori_pred[i]].item()
-        fidelity_sum += (ori_prob_single - excluded_prob_single)
+        ori_prob_single = ori_prob[i, ori_pred[i]].item()  # 原图对原始预测类的概率
+        cf_prob_single = cf_prob[i, ori_pred[i]].item()  # 反事实图对同一类的概率
+        fidelity_sum += (ori_prob_single - cf_prob_single)  # 下降量（越大说明解释越有效）
 
     return fidelity_sum
 
@@ -940,4 +969,5 @@ def compute_robust_fidelity(
 
     return (final_fid_plus_prob, final_fid_minus_prob, final_fid_delta_prob,
             final_fid_plus_acc, final_fid_minus_acc, final_fid_delta_acc)
+
 

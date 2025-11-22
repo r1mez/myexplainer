@@ -186,7 +186,11 @@ def to_nx(data: Data) -> nx.Graph:
     edges = data.edge_index.t().cpu().numpy().tolist()
     g.add_edges_from(edges)
     for i in range(data.num_nodes):
-        g.nodes[i]['feature'] = torch.argmax(data.x[i]).item()
+        try:
+            g.nodes[i]['feature'] = torch.argmax(data.x[i]).item()
+        except:
+            # 如果没有feature，则跳过
+             continue
     return g
 
 
@@ -209,9 +213,6 @@ def generate_node_mappings(
 
     graph_nx = to_nx(graph)
     sub_nx = to_nx(subgraph)
-
-    def node_match(n1, n2):
-        return graph_nx.nodes[n1['feature']] == sub_nx.nodes[n2['feature']]
 
     gm = isomorphism.GraphMatcher(graph_nx, sub_nx)
 
@@ -265,34 +266,40 @@ def concat_graphs(args, outputs, batch):
     reconstructed_graphs = []
 
     for i in range(batch_size):
-        orig = orig_graphs[i]
-        sub = sub_graphs[i]
-        mapping = sub.node_mappings.to(device)  # (real_n,)
-        real_mask = sub.real_mask.to(device)  # (max_subgraph_nodes,)
-        real_indices = torch.where(real_mask)[0]  # (real_n,)
-        real_n = real_indices.size(0)
+        orig = orig_graphs[i]                           # 原图
+        sub = sub_graphs[i]                             # 取出的频繁子图
+        mapping = sub.node_mappings.to(device)          # 子图 - > 原图的依次节点映射
+        real_mask = sub.real_mask.to(device)
+        real_indices = torch.where(real_mask)[0]        # 子图中除去填充节点的真实节点索引
+        real_n = real_indices.size(0)                   # 子图中除去填充节点的真实节点数
 
-        # Reconstruct node features
-        recon_x = orig.x.clone()
+        # 重构节点特征
+        output_x = orig.x.clone()                        # 原图节点特征矩阵（ori_num_nodes * x_dim），准备根据模型输出重构节点特征
         if real_n > 0:
-            x_recon_sub = x_recon[i, real_indices]  # (real_n, x_dim) 连续值
 
-            # Straight-Through Estimator: 前向用离散值，反向传连续梯度
-            atom_indices = torch.argmax(x_recon_sub, dim=-1)  # (real_n,)
-            x_recon_onehot = torch.zeros_like(x_recon_sub)  # (real_n, x_dim)
-            x_recon_onehot.scatter_(1, atom_indices.unsqueeze(-1), 1.0)
-
-            if args.train_mode:
-                # 训练模式：使用 STE
-                # 前向：one-hot 离散值
-                # 反向：梯度绕过 argmax，直接传给 x_recon_sub
-                x_recon_final = x_recon_onehot - x_recon_sub.detach() + x_recon_sub
+            if args.dataset == 'ba2motif':
+                x_recon_sub = x_recon[i, real_indices]       # 子图中真实节点部分的重构特征 (real_n, x_dim)
+                output_x[mapping] = x_recon_sub
             else:
-                # 评估模式：纯离散化
-                x_recon_final = x_recon_onehot
+                x_recon_sub = x_recon[i, real_indices]       # 子图中真实节点部分的重构特征 (real_n, x_dim)
 
-            # 赋值到原图
-            recon_x[mapping] = x_recon_final
+                # Straight-Through Estimator: 前向用离散值，反向传连续梯度
+                atom_indices = torch.argmax(x_recon_sub, dim=-1)  # (real_n,)
+                x_recon_onehot = torch.zeros_like(x_recon_sub)  # (real_n, x_dim)
+                x_recon_onehot.scatter_(1, atom_indices.unsqueeze(-1), 1.0)
+
+                if args.train_mode:
+                    # 训练模式：使用 STE
+                    # 前向：one-hot 离散值
+                    # 反向：梯度绕过 argmax，直接传给 x_recon_sub
+                    x_recon_final = x_recon_onehot - x_recon_sub.detach() + x_recon_sub
+                else:
+                    # 评估模式：纯离散化
+                    x_recon_final = x_recon_onehot
+
+                # 赋值到原图
+                output_x[mapping] = x_recon_final
+
 
         # Reconstruct edge_index
         sub_nodes_mask = torch.zeros(orig.num_nodes, dtype=torch.bool, device=device)
@@ -325,7 +332,7 @@ def concat_graphs(args, outputs, batch):
                 recon_edge_index = torch.cat([recon_edge_index, sub_edge_index_full], dim=1)
 
         recon_data = Data(
-            x=recon_x,
+            x=output_x,
             edge_index=recon_edge_index,
             # batch = batch['graphs'].batch
         )
@@ -401,5 +408,7 @@ def _sanitize_with_valence_correction(mol: Chem.RWMol) -> None:
             _sanitize_with_valence_correction(mol)
         else:
             raise ValueError(f"No atom number in exception: {str(e)}")
+
+
 
 

@@ -5,9 +5,9 @@ from networkx.classes import nodes
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from scipy.spatial.distance import cdist
-from torch_geometric.data import Data
+from torch_geometric.data import Data, Batch
 from torch_geometric.utils import from_networkx
-from typing import Set, Tuple, List
+from typing import Set, Tuple, List, Union
 from data.mutag.smiles import data_to_smiles
 import re
 from time import time
@@ -284,177 +284,301 @@ def _sanitize_with_valence_correction(mol: Chem.RWMol) -> None:
             raise ValueError(f"No atom number in exception: {str(e)}")
 
 
-def extract_explanatory_subgraph(original, counterfactual):
+def extract_explanatory_subgraph(
+    original: Union[Data, Batch, List[Data]],
+    counterfactual: Union[Data, Batch, List[Data]]
+) -> Union[Data, Batch, List[Data]]:
     """
-        Converts original and counterfactual graphs (both torch_geometric.data.Data)
-        into an explanation subgraph based on the specified logic.
+    解释子图：只基于边集变化（无向意义上的边集差异）。
 
-        Logic:
-        - Traverse original graph's edges: if an edge exists in both, exclude it from explanation.
-          If unique to original, include it and its endpoints.
-        - For nodes: include if features differ between original and counterfactual.
-        - Finally, add edges unique to counterfactual.
+    规则：
+    - 解释边 =
+        * 原图有但反事实没有的边
+        * 反事实有但原图没有的边
+      （用无向 canonical 形式比较：{min(u,v), max(u,v)}）
+    - 解释子图的节点特征来自原图。
+    - 如果原图和反事实图在 canonical 边集上一样：
+        -> 返回的解释子图保留原图所有节点（x不变），但 edge_index 为空。
+    - 有变化时：
+        -> 只保留“涉及变化边”的端点节点，然后重新编号为紧凑的 0..N-1。
+    """
 
-        Assumes undirected graphs where edge_index may not be sorted, but canonicalizes edges as (min(u,v), max(u,v)) for existence checks.
-        Node features (x) in the output use the original graph's values.
-        """
-    if original.x.size(0) != counterfactual.x.size(0):
-        raise ValueError("Original and counterfactual graphs must have the same number of nodes.")
+    def _process_pair(orig: Data, cf: Data) -> Data:
+        if orig.num_nodes != cf.num_nodes:
+            raise ValueError(f"Graph pair mismatch: {orig.num_nodes} vs {cf.num_nodes} nodes.")
 
-    num_nodes = original.x.size(0)
+        device = orig.x.device
+        num_nodes, feat_dim = orig.x.shape
 
-    # Get canonical edge sets for existence checks (undirected: (min(u,v), max(u,v)))
-    def get_canonical_edge_set(edge_index: torch.Tensor) -> Set[Tuple[int, int]]:
-        edge_set = set()
-        for i in range(edge_index.size(1)):
-            u = edge_index[0, i].item()
-            v = edge_index[1, i].item()
-            edge_set.add((min(u, v), max(u, v)))
-        return edge_set
+        # 无向 canonical 边集：用于判断边是否存在（忽略方向/多重边）
+        def canonical_edges(edge_idx: torch.Tensor) -> set:
+            if edge_idx.numel() == 0:
+                return set()
+            src, tgt = edge_idx
+            mins = torch.min(src, tgt)
+            maxs = torch.max(src, tgt)
+            return {(int(mn), int(mx)) for mn, mx in zip(mins, maxs)}
 
-    original_edge_set = get_canonical_edge_set(original.edge_index)
-    counterfactual_edge_set = get_canonical_edge_set(counterfactual.edge_index)
+        orig_canon = canonical_edges(orig.edge_index)
+        cf_canon = canonical_edges(cf.edge_index)
 
-    # First, collect changed nodes (node feature differences)
-    changed_nodes: Set[int] = set()
-    for i in range(num_nodes):
-        if not torch.equal(original.x[i], counterfactual.x[i]):
-            changed_nodes.add(i)
+        # 如果无向边集完全相同：解释子图 = 所有原图节点 + 空边集
+        if orig_canon == cf_canon:
+            empty_eidx = torch.empty((2, 0), dtype=torch.long, device=device)
+            # 保留原图节点特征
+            return Data(x=orig.x.clone(), edge_index=empty_eidx)
 
-    # Collect edges unique to original (keep original direction)
-    explain_edge_indices: List[torch.Tensor] = []
-    for i in range(original.edge_index.size(1)):
-        u = original.edge_index[0, i].item()
-        v = original.edge_index[1, i].item()
-        key = (min(u, v), max(u, v))
-        if key not in counterfactual_edge_set:
-            explain_edge_indices.append(original.edge_index[:, i:i + 1])
+        explain_edges = []
 
-    # Collect edges unique to counterfactual (keep counterfactual direction)
-    # for i in range(counterfactual.edge_index.size(1)):
-    #     u = counterfactual.edge_index[0, i].item()
-    #     v = counterfactual.edge_index[1, i].item()
-    #     key = (min(u, v), max(u, v))
-    #     if key not in original_edge_set:
-    #         explain_edge_indices.append(counterfactual.edge_index[:, i:i + 1])
+        # 1) 原图有、反事实没有的边（保留原图方向）
+        src_o, tgt_o = orig.edge_index
+        for i in range(orig.edge_index.size(1)):
+            u = int(src_o[i])
+            v = int(tgt_o[i])
+            key = (min(u, v), max(u, v))
+            if key not in cf_canon:
+                explain_edges.append(orig.edge_index[:, i:i + 1])
 
-    # Additional rule: Add edges from original that connect two changed nodes
-    for i in range(original.edge_index.size(1)):
-        u = original.edge_index[0, i].item()
-        v = original.edge_index[1, i].item()
-        if u in changed_nodes and v in changed_nodes:
-            # Add the edge (even if it exists in counterfactual, as per rule)
-            explain_edge_indices.append(original.edge_index[:, i:i + 1])
+        # 2) 反事实有、原图没有的边（保留反事实方向）
+        src_c, tgt_c = cf.edge_index
+        for i in range(cf.edge_index.size(1)):
+            u = int(src_c[i])
+            v = int(tgt_c[i])
+            key = (min(u, v), max(u, v))
+            if key not in orig_canon:
+                # 注意把边搬到 orig 所在 device
+                explain_edges.append(cf.edge_index[:, i:i + 1].to(device=device))
 
-    # Concatenate all explain edges
-    if explain_edge_indices:
-        explain_edge_index = torch.cat(explain_edge_indices, dim=1)
+        # 理论上 orig_canon != cf_canon 时 explain_edges 一定非空，但做个兜底
+        if explain_edges:
+            explain_eidx = torch.cat(explain_edges, dim=1)
+        else:
+            explain_eidx = torch.empty((2, 0), dtype=torch.long, device=device)
+
+        # 从解释边的端点收集需要保留的节点
+        nodes_set = set()
+        if explain_eidx.numel() > 0:
+            nodes_set.update(int(u) for u in explain_eidx[0])
+            nodes_set.update(int(v) for v in explain_eidx[1])
+
+        # 极端兜底：如果 nodes_set 竟然为空，就退化成“保留所有节点、无边”
+        if not nodes_set:
+            empty_eidx = torch.empty((2, 0), dtype=torch.long, device=device)
+            return Data(x=orig.x.clone(), edge_index=empty_eidx)
+
+        node_list = sorted(nodes_set)
+        node_map = {old: new for new, old in enumerate(node_list)}
+
+        # 重新取节点特征（来自原图）
+        idx_tensor = torch.tensor(node_list, dtype=torch.long, device=device)
+        explain_x = orig.x[idx_tensor]
+
+        # 重新编号解释边
+        new_src = torch.tensor(
+            [node_map[int(u)] for u in explain_eidx[0]],
+            dtype=torch.long,
+            device=device,
+        )
+        new_tgt = torch.tensor(
+            [node_map[int(v)] for v in explain_eidx[1]],
+            dtype=torch.long,
+            device=device,
+        )
+        new_eidx = torch.stack([new_src, new_tgt], dim=0)
+
+        return Data(x=explain_x, edge_index=new_eidx)
+
+    # 输入归一化：统一成 List[Data]
+    def normalize_input(inp: Union[Data, Batch, List[Data]]) -> List[Data]:
+        if isinstance(inp, Data):
+            return [inp]
+        elif isinstance(inp, Batch):
+            return inp.to_data_list()
+        elif isinstance(inp, list):
+            if not all(isinstance(g, Data) for g in inp):
+                raise ValueError("List must contain Data objects.")
+            return inp
+        else:
+            raise ValueError("Input must be Data, Batch, or list of Data.")
+
+    orig_list = normalize_input(original)
+    cf_list = normalize_input(counterfactual)
+
+    if len(orig_list) != len(cf_list):
+        raise ValueError("Original and counterfactual inputs must have matching number of graphs.")
+
+    explain_list = [_process_pair(o, c) for o, c in zip(orig_list, cf_list)]
+
+    # 返回类型与输入保持一致
+    if len(explain_list) == 1:
+        return explain_list[0]
+    elif isinstance(original, Batch) or isinstance(counterfactual, Batch):
+        return Batch.from_data_list(explain_list)
     else:
-        explain_edge_index = torch.empty((2, 0), dtype=torch.long, device=original.edge_index.device)
-
-    # Collect all relevant nodes: changed + endpoints of explain edges
-    all_nodes: Set[int] = changed_nodes.copy()
-    for i in range(explain_edge_index.size(1)):
-        all_nodes.add(explain_edge_index[0, i].item())
-        all_nodes.add(explain_edge_index[1, i].item())
-
-    if not all_nodes:
-        # Empty graph if no nodes
-        return Data(x=torch.empty((0, original.x.size(1)), dtype=original.x.dtype, device=original.x.device),
-                    edge_index=torch.empty((2, 0), dtype=torch.long, device=original.edge_index.device))
-
-    node_list = sorted(all_nodes)
-    num_explain_nodes = len(node_list)
-    node_to_new_idx = {old: new_idx for new_idx, old in enumerate(node_list)}
-
-    # Remap node features (use original's x)
-    explain_x = original.x[node_list]
-
-    # Remap edge indices (only if there are edges)
-    if explain_edge_index.size(1) > 0:
-        new_edge_index = torch.zeros_like(explain_edge_index)
-        for i in range(explain_edge_index.size(1)):
-            new_u = node_to_new_idx[explain_edge_index[0, i].item()]
-            new_v = node_to_new_idx[explain_edge_index[1, i].item()]
-            new_edge_index[0, i] = new_u
-            new_edge_index[1, i] = new_v
-        explain_edge_index = new_edge_index
-    # else: already empty
-
-    # Create new Data object
-    # Only include x and edge_index to ensure consistent attributes across all graphs in a batch
-    # This prevents KeyError when creating batches with Batch.from_data_list()
-    explain_graph = Data(x=explain_x, edge_index=explain_edge_index)
-
-    return explain_graph
+        return explain_list
 
 
-def exclude_explanatory_subgraph(original: Data, counterfactual: Data) -> Data:
+def exclude_explanatory_subgraph(original: Union[Data, Batch, List[Data]],
+                                 counterfactual: Union[Data, Batch, List[Data]]) -> Union[Data, Batch, List[Data]]:
     """
-    从原图中删除解释子图，返回非解释子图。
+    Efficient batch-enabled non-explanatory subgraph extraction (excludes explanatory parts).
 
-    逻辑：
-    - 保留所有节点（节点特征来自原图）
-    - 保留原图中的边，除非：
-      1. 该边在反事实图中不存在，或
-      2. 该边的两个端点的特征在反事实图中都发生了变化
+    Supports single Data, lists of Data, or Batch objects for both inputs.
+    Processes each graph pair independently using vectorized operations where possible.
+    For Batch inputs, uses to_data_list() for per-graph processing, then reconstructs Batch.
+    Time complexity: O(sum(V + E) over all graphs), suitable for batched inference.
 
-    Args:
-        original (Data): 原图 (torch_geometric.data.Data)
-        counterfactual (Data): 反事实图（节点数与原图相同，一一对应）
-
-    Returns:
-        Data: 非解释子图（包含所有节点，但只保留非解释性的边）
+    Logic (vectorized where feasible):
+    - Changed nodes: Vectorized mask via (original.x != counterfactual.x).any(-1).
+    - Retained edges: From original, only if exists in counterfactual AND not both endpoints changed.
+    - Node features: Original, but zeroed for changed nodes.
+    - All nodes preserved; only edges filtered.
     """
-    if original.x.size(0) != counterfactual.x.size(0):
-        raise ValueError("Original and counterfactual graphs must have the same number of nodes.")
 
-    num_nodes = original.x.size(0)
-    device = original.x.device
+    def _process_pair(orig: Data, cf: Data) -> Data:
+        if orig.num_nodes != cf.num_nodes:
+            raise ValueError(f"Graph pair mismatch: {orig.num_nodes} vs {cf.num_nodes} nodes.")
 
-    # 获取规范化边集合（无向边用 (min, max) 表示）
-    def get_canonical_edge_set(edge_index: torch.Tensor) -> Set[Tuple[int, int]]:
-        edge_set = set()
-        for i in range(edge_index.size(1)):
-            u = edge_index[0, i].item()
-            v = edge_index[1, i].item()
-            edge_set.add((min(u, v), max(u, v)))
-        return edge_set
+        device = orig.x.device
+        num_nodes, feat_dim = orig.x.shape
 
-    original_edge_set = get_canonical_edge_set(original.edge_index)
-    counterfactual_edge_set = get_canonical_edge_set(counterfactual.edge_index)
+        # Vectorized changed nodes mask
+        changed_mask = ~(orig.x == cf.x).all(-1)  # bool tensor [num_nodes]
+        changed_nodes = torch.nonzero(changed_mask).flatten()  # tensor [num_changed]
+        changed_set = set(changed_nodes.tolist())
 
-    # 识别特征发生变化的节点
-    changed_nodes: Set[int] = set()
-    for i in range(num_nodes):
-        if not torch.equal(original.x[i], counterfactual.x[i]):
-            changed_nodes.add(i)
+        # Canonical edge sets: sorted (min(u,v), max(u,v)) as tuples in sets
+        def canonical_edges(edge_idx: torch.Tensor) -> set:
+            src, tgt = edge_idx
+            mins = torch.min(src, tgt)
+            maxs = torch.max(src, tgt)
+            return {(min.item(), max.item()) for min, max in zip(mins, maxs)}
 
-    # 收集要保留的边
-    keep_edge_indices: List[torch.Tensor] = []
-    for i in range(original.edge_index.size(1)):
-        u = original.edge_index[0, i].item()
-        v = original.edge_index[1, i].item()
-        edge_key = (min(u, v), max(u, v))
+        orig_canon = canonical_edges(orig.edge_index)
+        cf_canon = canonical_edges(cf.edge_index)
 
-        # 规则4: 如果边在counterfactual中不存在，不保留（这是解释性的边）
-        if edge_key not in counterfactual_edge_set:
-            continue
+        # Collect keep edge indices (keep original direction)
+        keep_edges = []  # list of [2,1] tensors
 
-        # 规则6: 如果边的两个端点特征都发生了变化，不保留（这也是解释性的边）
-        if u in changed_nodes and v in changed_nodes:
-            continue
+        src_o, tgt_o = orig.edge_index
+        for i in range(orig.num_edges):
+            u, v = src_o[i].item(), tgt_o[i].item()
+            edge_key = (min(u, v), max(u, v))
 
-        # 规则5: 两个图中都存在的边，且不满足规则6，则保留
-        keep_edge_indices.append(original.edge_index[:, i:i+1])
+            # Rule: Skip if not in counterfactual
+            if edge_key not in cf_canon:
+                continue
 
-    # 构建非解释子图
-    if keep_edge_indices:
-        keep_edge_index = torch.cat(keep_edge_indices, dim=1)
+            # Rule: Skip if both endpoints changed
+            if u in changed_set and v in changed_set:
+                continue
+
+            # Retain
+            keep_edges.append(orig.edge_index[:, i:i + 1])
+
+        # Concat edges
+        if keep_edges:
+            keep_eidx = torch.cat(keep_edges, dim=1)
+        else:
+            keep_eidx = torch.empty((2, 0), dtype=torch.long, device=device)
+
+        # Node features: original, zero changed
+        non_explain_x = orig.x.clone()
+        if len(changed_nodes) > 0:
+            non_explain_x[changed_nodes] = 0
+
+        return Data(x=non_explain_x, edge_index=keep_eidx)
+
+    # Input normalization
+    def normalize_input(inp: Union[Data, Batch, List[Data]]) -> List[Data]:
+        if isinstance(inp, Data):
+            return [inp]
+        elif isinstance(inp, Batch):
+            return inp.to_data_list()
+        elif isinstance(inp, list):
+            if not all(isinstance(g, Data) for g in inp):
+                raise ValueError("List must contain Data objects.")
+            return inp
+        else:
+            raise ValueError("Input must be Data, Batch, or list of Data.")
+
+    orig_list = normalize_input(original)
+    cf_list = normalize_input(counterfactual)
+
+    if len(orig_list) != len(cf_list):
+        raise ValueError("Original and counterfactual inputs must have matching number of graphs.")
+
+    non_explain_list = [_process_pair(o, c) for o, c in zip(orig_list, cf_list)]
+
+    if len(non_explain_list) == 1:
+        return non_explain_list[0]
+    elif isinstance(original, Batch) or isinstance(counterfactual, Batch):
+        return Batch.from_data_list(non_explain_list)
     else:
-        keep_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+        return non_explain_list
 
-    # 保留所有节点（使用原图的节点特征）
-    non_explain_graph = Data(x=original.x.clone(), edge_index=keep_edge_index)
 
-    return non_explain_graph
+def process_outputs(args, outputs):
+    """
+    将重构的节点特征 x_recon 和邻接矩阵 adj_recon 转换为 PyG 格式的 Batch。
+
+    参数:
+        args: 包含配置信息的参数对象
+            - max_subgraph_nodes: 最大节点数
+            - x_dim: 节点特征维度
+            - device: 设备
+        outputs: dict，模型输出，包含
+            - 'x_recon': 重构的节点特征，shape [B, N*F] 或 [B, N, F]
+            - 'adj_recon': 重构的邻接矩阵，shape [B, N*N] 或 [B, N, N]
+
+    返回:
+        Batch: PyG的Batch对象，包含batch_size个重构图
+    """
+    device = args.device
+    max_num_nodes = args.max_subgraph_nodes
+    x_dim = args.x_dim
+
+    # 从outputs中提取重构结果
+    x_recon = outputs['x_recon']  # [B, N*F] 或 [B, N, F]
+    adj_recon = outputs['adj_recon']  # [B, N*N] 或 [B, N, N]
+
+    # 1. 确保形状正确：将扁平化的张量reshape为 (batch_size, max_num_nodes, *)
+    if x_recon.dim() == 2:
+        # [B, N*F] -> [B, N, F]
+        batch_size = x_recon.shape[0]
+        x_recon = x_recon.view(batch_size, max_num_nodes, x_dim)
+    else:
+        # 已经是 [B, N, F]
+        batch_size = x_recon.shape[0]
+
+    if adj_recon.dim() == 2:
+        # [B, N*N] -> [B, N, N]
+        adj_recon = adj_recon.view(batch_size, max_num_nodes, max_num_nodes)
+    # 否则已经是 [B, N, N]
+
+    # 2. 为每个batch中的图创建PyG Data对象
+    graphs = []
+    for i in range(batch_size):
+        x_i = x_recon[i]  # [N, F]
+        adj_i = adj_recon[i]  # [N, N]
+
+        # 3. 将邻接矩阵转换为edge_index
+        # 设置阈值，将概率值转换为0/1（可根据需要调整阈值）
+        threshold = 0.5
+        mask = adj_i > threshold
+
+        # 获取所有边的索引 [2, E]
+        edge_index = torch.nonzero(mask, as_tuple=False).t().contiguous()
+
+        # 4. 创建PyG Data对象
+        graph = Data(
+            x=x_i,  # [N, F]
+            edge_index=edge_index,  # [2, E]
+            num_nodes=max_num_nodes
+        )
+        graphs.append(graph)
+
+    # 5. 将所有图合并为一个Batch
+    batch = Batch.from_data_list(graphs).to(device)
+
+    return batch

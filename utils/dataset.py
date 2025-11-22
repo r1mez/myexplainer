@@ -3,6 +3,7 @@ import os
 from datasets import Mutagenicity
 from datasets import NCI1
 from datasets import bbbp
+from datasets import BA2Motif
 
 def get_datasets(name, root="data/"):
     """
@@ -52,6 +53,11 @@ def get_datasets(name, root="data/"):
         test_dataset = WebDataset(folder, mode="testing", name=name)
         val_dataset = WebDataset(folder, mode="evaluating", name=name)
         train_dataset = WebDataset(folder, mode="training", name=name)
+    elif name == "ba2motif":
+        folder = os.path.join(root, "ba2motif")
+        train_dataset = BA2Motif(folder, mode="training")
+        test_dataset = BA2Motif(folder, mode="testing")
+        val_dataset = BA2Motif(folder, mode="evaluation")
     else:
         raise ValueError
     return train_dataset, val_dataset, test_dataset

@@ -7,6 +7,7 @@ import os
 import networkx as nx
 
 from evaluation import evaluate
+from utils.batch_utils import core_data_from_batch
 
 sys.path.append("..")
 
@@ -55,7 +56,8 @@ def parse_args():
     parser.add_argument("--max_subgraph_nodes", type=int, default=20, help="Maximum number of subgraph nodes.")     # 53, 20
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate.")
 
-    parser.add_argument("--visualize", type=bool, default=False, help="Whether to visualize counterfactuals.")
+    # parser.add_argument("--visualize", type=bool, default=True, help="Whether to visualize counterfactuals.")
+    parser.add_argument("--visualize", type=bool, default=True, help="Whether to visualize counterfactuals.")
 
     return parser.parse_args()
 
@@ -160,39 +162,14 @@ def generate_counterfactuals(args, model, gnn, test_loader):
             y = ori_pred.float().unsqueeze(1)
 
             # 4. 准备子图特征和邻接矩阵
-            subgraph_x_list = []
-            zero_x_template = torch.zeros(args.max_subgraph_nodes, args.x_dim, device=args.device)
 
-            # 提取所有子图节点特征
-            for b in range(batch_size):
-                # 提取单个子图
-                mask = (batch['subgraphs'].batch == b)
-                num_nodes_tensor = mask.sum()
-
-                subgraph_x = batch['subgraphs'].x[mask]
-
-                # 使用clone而不是zeros创建新张量
-                subgraph_x_padded = zero_x_template.clone()
-                num_nodes_i = num_nodes_tensor.item()
-                if num_nodes_i > 0:
-                    subgraph_x_padded[:num_nodes_i] = subgraph_x
-
-                subgraph_x_list.append(subgraph_x_padded)
-
-            # 堆叠所有子图节点特征
-            all_subgraph_x = torch.stack(subgraph_x_list, dim=0)  # (B, max_num_nodes, x_dim)
-
-            all_subgraph_adj = to_dense_adj(
-                batch["subgraphs"].edge_index,
-                batch=batch["subgraphs"].batch,
-                max_num_nodes=args.max_subgraph_nodes
-            )
-            all_subgraph_x, all_subgraph_adj = all_subgraph_x.to(args.device), all_subgraph_adj.to(args.device)
+            all_subgraph_x, all_subgraph_adj, all_subgraph_edge_attr = core_data_from_batch(args, batch)
 
             # 5. 使用模型生成反事实图
             outputs = model(
-                features=all_subgraph_x,
+                x=all_subgraph_x,
                 adj=all_subgraph_adj,
+                edge_attr=all_subgraph_edge_attr,
                 y_cf=y_cf
             )
 
@@ -201,8 +178,6 @@ def generate_counterfactuals(args, model, gnn, test_loader):
 
             # 7. 使用GNN对生成的图进行预测
             gen_pred_logits = gnn.get_pred(concated_graphs.x, concated_graphs.edge_index, concated_graphs.batch)[0]
-            if batch_idx == 0:
-                print(gnn.get_pred(concated_graphs.x, concated_graphs.edge_index, concated_graphs.batch)[0][17])
             gen_pred = gen_pred_logits.argmax(dim=1)  # (batch_size,)
 
             # 8. 保存结果
@@ -303,10 +278,15 @@ def visualize_counterfactuals(args, results, test_dataset, gnn, save_dir=None, m
             if hasattr(graph_data, 'x') and graph_data.x is not None:
                 x = graph_data.x  # Node features: (num_nodes, num_features)
                 atom_indices = torch.argmax(x, dim=1).cpu().numpy()  # Argmax to get atom index per node
-                labels = {node: atom_map.get(idx.item(), f'Unknown({idx.item()})') for node, idx in enumerate(atom_indices)}
+                labels = {}
+                for node, idx in enumerate(atom_indices):
+                    if x[node].sum() == 0:  # 如果节点特征全为0，则标签为'X'
+                        labels[node] = 'X'
+                    else:
+                        labels[node] = atom_map.get(idx.item(), f'Unknown({idx.item()})')
             else:
                 # Fallback: use node index as string
-                labels = {node: str(node) for node in graph_data.num_nodes}
+                labels = {node: str(node) for node in range(graph_data.num_nodes)}  # 修正：使用 range(graph_data.num_nodes)
             return labels
 
         ori_labels = get_atom_labels(ori_graph, atom_map)
@@ -315,14 +295,14 @@ def visualize_counterfactuals(args, results, test_dataset, gnn, save_dir=None, m
         exp_excluded_labels = get_atom_labels(exp_excluded_graph, atom_map)
 
         # Compute positions using original graph layout (reuse for both)
-        pos = nx.spring_layout(G_ori)
+        pos = nx.spring_layout(G_ori, seed=42)
 
 
         missing_nodes = set(G_ori.nodes()) - set(pos.keys())
         if missing_nodes:
             print(f"Warning: Missing positions for nodes {missing_nodes}")
             # 可选：为缺失节点分配默认位置，例如使用 spring_layout 补全
-            additional_pos = nx.spring_layout(G_ori.subgraph(missing_nodes))
+            additional_pos = nx.spring_layout(G_ori.subgraph(missing_nodes), seed=42)
             pos.update(additional_pos)
 
 
@@ -340,7 +320,7 @@ def visualize_counterfactuals(args, results, test_dataset, gnn, save_dir=None, m
         if missing_nodes:
             print(f"Warning: Missing positions for nodes {missing_nodes}")
             # 可选：为缺失节点分配默认位置，例如使用 spring_layout 补全
-            additional_pos = nx.spring_layout(G_gen.subgraph(missing_nodes))
+            additional_pos = nx.spring_layout(G_gen.subgraph(missing_nodes), seed=42)
             pos.update(additional_pos)
 
         # Plot generated graph with highlighted nodes and atom labels, using same positions
@@ -360,12 +340,10 @@ def visualize_counterfactuals(args, results, test_dataset, gnn, save_dir=None, m
                 node_size=100, font_size=10, font_weight='bold', edge_color='gray')
         ax4.set_title(f'Explanatory Subgraph Excluded\nGNN Pred: {exp_excluded_pred}')
 
-        plt.tight_layout()
+        # plt.tight_layout()
 
-        if save_dir:
-            plt.savefig(os.path.join(save_dir, f'cf_sample_{i}.png'), dpi=300, bbox_inches='tight')
-        else:
-            plt.show()
+        plt.savefig(os.path.join(save_dir, f'cf_sample_{i}.png'), dpi=300, bbox_inches='tight')
+        plt.show()
 
         plt.close(fig)
 
@@ -747,6 +725,33 @@ def main():
             evaluation_metrics["fidelity"]
         )
     )
+
+    print("  Robust Fidelity+ Prob ↑: {:.4f}".format(
+        evaluation_metrics["ro_fid_prob_plus"]
+        )
+    )
+    print("  Robust Fidelity- Prob ↓: {:.4f}".format(
+        evaluation_metrics["ro_fid_prob_minus"]
+        )
+    )
+    print("  Robust Fidelity Delta Prob ↑: {:.4f}".format(
+        evaluation_metrics["ro_fid_prob_delta"]
+        )
+    )
+    print("  Robust Fidelity+ Acc ↑: {:.4f}".format(
+        evaluation_metrics["ro_fid_acc_plus"]
+        )
+    )
+    print("  Robust Fidelity- Acc ↓: {:.4f}".format(
+        evaluation_metrics["ro_fid_acc_minus"]
+        )
+    )
+    print("  Robust Fidelity Delta Acc ↑: {:.4f}".format(
+        evaluation_metrics["ro_fid_acc_delta"]
+        )
+    )
+
+
     print(
         "  Sparsity ↑: {:.4f}".format(
             evaluation_metrics["sparsity"]
