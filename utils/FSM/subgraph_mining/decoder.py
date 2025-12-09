@@ -223,6 +223,10 @@ def pattern_growth(dataset, task, args, label=None):
 
 def FSMiner(dataset, label):
     parser = argparse.ArgumentParser(description='Decoder arguments')
+    if type(dataset).__name__.lower() == 'mutagenicity':
+        parser.add_argument("--dataset", type=str, default='mutag')
+    else:
+        parser.add_argument("--dataset", type=str, default=type(dataset).__name__.lower())
     parse_encoder(parser)
     parse_decoder(parser)
     args = parser.parse_args()

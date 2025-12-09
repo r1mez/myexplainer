@@ -811,7 +811,7 @@ class MyExplainerV2(nn.Module):
     # ================= forward：构造 CF 图 =================
 
     def forward(self, graphs, subgraphs=None, use_subgraph_gt=True,
-                max_cand_per_graph=3):
+                max_cand_per_graph=5):
 
         x = graphs.x
         edge_index = graphs.edge_index
@@ -833,8 +833,8 @@ class MyExplainerV2(nn.Module):
 
         # 4) DeleteHead：已有边的 p_keep
         p_keep, logit_keep = self.compute_p_keep(node_rep, edge_index)
-        if torch.rand(1).item()<0.1:
-            print(p_keep)
+        # if torch.rand(1).item()<0.1:
+        #     print(p_keep)
 
         # 5) AddHead(VGAE)：FS 内部非边的 p_add + VGAE losses
         cand_src, cand_dst, p_add, add_recon_loss, add_kl_loss = self.run_fs_vgae(
@@ -921,14 +921,14 @@ class MyExplainerV2(nn.Module):
         l1_del = (1 - p_keep).mean()
 
         # ---- 3. VGAE loss 权重 ----
-        w_cf = getattr(args, "w_cf", 1.0)
+        w_cf = getattr(args, "w_cf", 5.0)
         w_add_budget = getattr(args, "w_add_budget", 0.1)
         w_del_budget = getattr(args, "w_del_budget", 0.0)
-        w_l1_add = getattr(args, "w_l1_add", 0.01)
-        w_l1_del = getattr(args, "w_l1_del", 0.00)
+        w_l1_add = getattr(args, "w_l1_add", 0.1)
+        w_l1_del = getattr(args, "w_l1_del", 0.5)
 
-        w_vgae_recon = getattr(args, "w_vgae_recon", 1.0)
-        w_vgae_kl = getattr(args, "w_vgae_kl", 0.1)
+        w_vgae_recon = getattr(args, "w_vgae_recon", 5.0)
+        w_vgae_kl = getattr(args, "w_vgae_kl", 1)
 
         total_loss = (
             w_cf * cf_main_loss +
@@ -949,8 +949,8 @@ class MyExplainerV2(nn.Module):
             # "del_budget": del_budget_loss.detach(),
             # "l1_add": (l1_add if isinstance(l1_add, torch.Tensor) else torch.tensor(l1_add)).detach(),
             # "l1_del": l1_del.detach(),
-            # "recon": add_recon_loss.detach(),
-            # "kl": add_kl_loss.detach(),
+            "recon": add_recon_loss.detach(),
+            "kl": add_kl_loss.detach(),
         }
 
 

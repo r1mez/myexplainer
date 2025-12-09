@@ -49,15 +49,16 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
 
     # 模型参数
+    # ba2: 128,32    mutag:256,32
     # parser.add_argument('--x_dim', type=int, default=10, help='Node feature dimension (14 for mutag)')
-    parser.add_argument('--h_dim', type=int, default=128, help='Hidden dimension')
+    parser.add_argument('--h_dim', type=int, default=256, help='Hidden dimension')
     parser.add_argument('--z_dim', type=int, default=32, help='Latent dimension')
 
     parser.add_argument('--max_num_nodes', type=int, default=25, help='Maximum number of nodes in a graph')         # 53, 28
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
 
     # 训练参数
-    parser.add_argument('--epochs', type=int, default=200, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
 
@@ -105,7 +106,6 @@ def main():
     indices_0 = [i for i, pred in enumerate(pred_labels) if pred == 0]
     indices_1 = [i for i, pred in enumerate(pred_labels) if pred == 1]
     train_dataset_0, train_dataset_1 = train_dataset[indices_0], train_dataset[indices_1]
-    print(pred_probs)
 
 
 
@@ -135,17 +135,17 @@ def main():
 
 
 
-    def reverse_groups_new(lst, group_size=3):
-        """
-        返回新列表，按组倒序。
-        """
-        n = len(lst) // group_size
-        result = []
-        for i in range(n - 1, -1, -1):  # 从后往前遍历组索引
-            result.extend(lst[i * group_size:(i + 1) * group_size])
-        return result
-    patterns_0 = reverse_groups_new(patterns_0, group_size=3)
-    patterns_1 = reverse_groups_new(patterns_1, group_size=3)
+    # def reverse_groups_new(lst, group_size=3):
+    #     """
+    #     返回新列表，按组倒序。
+    #     """
+    #     n = len(lst) // group_size
+    #     result = []
+    #     for i in range(n - 1, -1, -1):  # 从后往前遍历组索引
+    #         result.extend(lst[i * group_size:(i + 1) * group_size])
+    #     return result
+    # patterns_0 = reverse_groups_new(patterns_0, group_size=3)
+    # patterns_1 = reverse_groups_new(patterns_1, group_size=3)
     patterns = {0: patterns_0, 1: patterns_1}
 
 
@@ -242,16 +242,16 @@ def main():
             evaluation_metrics["proximity"]
         )
     )
-    print(
-        "  Fidelity+ ↑: {:.4f}".format(
-            evaluation_metrics["fidelity+"]
-        )
-    )
-    print(
-        "  Fidelity- ↓: {:.4f}".format(
-            evaluation_metrics["fidelity-"]
-        )
-    )
+    # print(
+    #     "  Fidelity+ ↑: {:.4f}".format(
+    #         evaluation_metrics["fidelity+"]
+    #     )
+    # )
+    # print(
+    #     "  Fidelity- ↓: {:.4f}".format(
+    #         evaluation_metrics["fidelity-"]
+    #     )
+    # )
     print(
         "  Fidelity_prob ↑: {:.4f}".format(
             evaluation_metrics["fidelity"]

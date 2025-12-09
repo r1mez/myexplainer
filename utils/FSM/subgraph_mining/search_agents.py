@@ -276,6 +276,8 @@ class MCTSSearchAgent(SearchAgent):
             for node in pattern.nodes:
                 if "anchor" in pattern.nodes[node]:
                     del pattern.nodes[node]["anchor"]
+        cand_patterns_uniq = sorted(cand_patterns_uniq, key=lambda x: nx.density(x), reverse=True)
+        print(cand_patterns_uniq)
         return cand_patterns_uniq
 
 class GreedySearchAgent(SearchAgent):

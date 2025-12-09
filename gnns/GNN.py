@@ -425,7 +425,7 @@ class GNN_graphpred(torch.nn.Module):  # 预训练图预测
         return self.graph_pred_linear(self.pool(node_representation, batch))
 
 
-# TODO:ogb
+
 # def forward(self, x, edge_index, edge_attr): #edge_attr 是边特征矩阵，形状为 (num_edges, num_edge_features)
 #     device = x.device
 #     edge_index  = add_self_loops(edge_index, num_nodes=x.size(0))[0]

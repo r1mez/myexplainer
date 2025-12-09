@@ -189,7 +189,7 @@ def count_graphlets(queries, targets, n_workers=1, method="bin",
 
 def count_exact(queries, targets, args):
     print("WARNING: orca only works for node anchored")
-    # TODO: non node anchored
+
     n_matches_baseline = np.zeros(73)
     for target in targets:
         counts = np.array(orca.orbit_counts("node", 5, target))

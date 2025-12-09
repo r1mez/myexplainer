@@ -38,7 +38,7 @@ def parse_decoder(parser):
                         sample_method="tree",
                         skip="learnable",
                         min_pattern_size=5,
-                        max_pattern_size=10,
+                        max_pattern_size=12,
                         min_neighborhood_size=10,
                         max_neighborhood_size=10,
                         search_strategy="mcts",
@@ -46,6 +46,6 @@ def parse_decoder(parser):
                         node_anchored=False)
 
     parser.set_defaults(
-        dataset="ba2motif",
+        # dataset="ba2motif",
         batch_size=1000
     )

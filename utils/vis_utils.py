@@ -86,7 +86,7 @@ def visualize_explainer_graph(
     graphs,
     y_desired,
     outputs,
-    g_idx: int = 0,
+    g_idx: int = 11,
     tau_keep: float = 0.5,
     tau_add: float = 0.5,
     layout: str = "spring",
@@ -229,7 +229,7 @@ def visualize_explainer_graph(
         pos = nx.spring_layout(G, seed=seed)
 
     # ========= 6. 开始画图 =========
-    plt.figure(figsize=(6, 6))
+    plt.figure(figsize=(8, 6))
 
     # 6.1 画节点：FS 节点更红
     nodes = nx.draw_networkx_nodes(
@@ -237,7 +237,8 @@ def visualize_explainer_graph(
         node_color=node_vals,
         cmap=plt.cm.Reds,
         edgecolors="black",
-        node_size=300
+        node_size=100,
+        alpha=0.8
     )
 
     # 6.2 画原始边：根据 p_keep 分成保留 / 删除（颜色统一）
@@ -297,7 +298,25 @@ def visualize_explainer_graph(
             )
 
     # 6.4 标签 & colorbar
-    nx.draw_networkx_labels(G, pos, font_size=8)
+    if graphs[g_idx].smiles is not None:
+        x_g_cpu = x_g.cpu().numpy()  # [n_g, x_dim]
+
+        ATOM_TYPES = ["C", "O", "Cl", "H", "N", "F", "Br", "S", "P", "I", "Na", "K", "Li", "Ca"]
+
+        # 如果前 len(ATOM_TYPES) 维是原子类型 one-hot：
+        type_feat = x_g_cpu[:, :len(ATOM_TYPES)]  # [n_g, num_atom_types]
+
+        # 对每个节点的 one-hot 取 argmax 得到类型下标
+        atom_type_idx = type_feat.argmax(axis=1)  # [n_g]
+
+        # 构造 NetworkX 需要的 labels 字典：{节点局部id: 文本标签}
+
+        labels = {i: ATOM_TYPES[int(idx)] for i, idx in enumerate(atom_type_idx)}
+
+        # 用 labels 画出来
+        nx.draw_networkx_labels(G, pos, labels=labels, font_size=8)
+    else:
+        nx.draw_networkx_labels(G, pos, font_size=8)
 
     # 节点 FS 程度的 colorbar
     cb_nodes = plt.colorbar(nodes, shrink=0.6, pad=0.02)
@@ -311,11 +330,8 @@ def visualize_explainer_graph(
         cb_keep.set_label("p_keep (edge retention prob.)", fontsize=10)
 
     # 标题：简单用 y_desired 展示（如果你有 y_hat，可以自己改）
-    if y_desired is not None:
-        y_des_val = int(y_desired[g_idx].item()) if y_desired.dim() > 0 else int(y_desired.item())
-        plt.title(f"Graph #{g_idx} CF explanation (y_desired={y_des_val})")
-    else:
-        plt.title(f"Graph #{g_idx} CF explanation")
+    y_des_val = int(y_desired[g_idx].item()) if y_desired.dim() > 0 else int(y_desired.item())
+    plt.title(f"Graph #{g_idx} CF explanation (y_desired={y_des_val})\n{graphs[g_idx].get('smiles',None)}\ny_desired={y_desired[g_idx].item()}")
 
     plt.axis("off")
     plt.tight_layout()

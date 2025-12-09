@@ -182,7 +182,7 @@ class OTFSynDataSource(DataSource):
         pos_target = batch_target
         pos_target, pos_query = pos_target.apply_transform_multi(sample_subgraph)
         neg_target = batch_neg_target
-        # TODO: use hard negs
+
         hard_neg_idxs = set(random.sample(range(len(neg_target.G)),
             int(len(neg_target.G) * 1/2)))
         #hard_neg_idxs = set()

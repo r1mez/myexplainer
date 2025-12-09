@@ -200,7 +200,7 @@ class SkipLastGNN(nn.Module):
         # x = pyg_nn.global_mean_pool(x, batch)
         emb = pyg_nn.global_add_pool(emb, batch)
         emb = self.post_mp(emb)
-        #emb = self.batch_norm(emb)   # TODO: test
+        #emb = self.batch_norm(emb)
         #out = F.log_softmax(emb, dim=1)
         return emb
 

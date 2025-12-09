@@ -712,9 +712,9 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
     losses = {
         'total': [],
         'recon': [],
-        'mask': [],
-        'edit_inside': [],
-        'edit_outside': [],
+        # 'mask': [],
+        # 'edit_inside': [],
+        # 'edit_outside': [],
         'cf': [],
         'kl': [],
     }
@@ -739,9 +739,9 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
         epoch_losses = {
             'total': 0.0,
             'recon': 0.0,
-            'mask': 0.0,
-            'edit_inside': 0.0,
-            'edit_outside': 0.0,
+            # 'mask': 0.0,
+            # 'edit_inside': 0.0,
+            # 'edit_outside': 0.0,
             'cf': 0.0,
             'kl': 0.0,
         }
@@ -818,12 +818,12 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
             # 更新进度条
             progress_bar.set_postfix({
                 'loss': f'{total_loss.item():.4f}',
-                # 'recon': f'{loss_dict["recon"]:.4f}',
+                'recon': f'{loss_dict["recon"]:.4f}',
                 # 'mask': f'{loss_dict["mask"]:.4f}',
                 # 'edit_inside': f'{loss_dict["edit_inside"]:.4f}',
                 # 'edit_outside': f'{loss_dict["edit_outside"]:.4f}',
                 'cf': f'{loss_dict["cf"]:.4f}',
-                # 'kl': f'{loss_dict["kl"]:.4f}',
+                'kl': f'{loss_dict["kl"]:.4f}',
             })
 
         # 计算epoch平均损失
@@ -887,7 +887,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
     # plt.close()
 
     epochs_range = range(1, epochs + 1)
-    loss_types = ['total', 'recon', 'kl', 'cf', 'edit_inside', 'edit_outside']
+    loss_types = ['total', 'recon', 'kl', 'cf']
 
     for loss_type in loss_types:
         plt.figure(figsize=(10, 6))
