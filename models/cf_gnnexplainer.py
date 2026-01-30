@@ -209,74 +209,228 @@ def run_cf_gnnexplainer(
 	return cf_feat, cf_adj, cf_edge, graph_idx
 
 
+# def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
+# 	"""
+# 	评估CF-GNNExplainer，使用与MyExplainerV2相同的评估指标
+#
+# 	参数：
+# 		pred_model: 预训练的GNN分类器
+# 		dataset: 验证/测试数据集
+# 		device: 计算设备
+# 		lr: CFGNNExplainer的学习率
+# 		epochs: 每个图的优化轮数
+#
+# 	返回：
+# 		metrics: 包含validity, proximity, fidelity_prob, sparsity的字典
+# 	"""
+# 	from torch_geometric.data import Batch, Data
+# 	from torch_geometric.utils import dense_to_sparse
+#
+# 	print("\n" + "="*60)
+# 	print("Evaluating CF-GNNExplainer")
+# 	print("="*60)
+#
+# 	pred_model.eval()
+# 	explainer = CFExplainer(pred_model, device=device, lr=lr)
+#
+# 	# 预计算所有图的原始预测和目标标签
+# 	y_desired_list = []
+# 	ori_graphs_list = []
+# 	ori_prob_list = []
+#
+# 	print("\n1. Computing original predictions...")
+# 	with torch.no_grad():
+# 		for data in tqdm(dataset):
+# 			data = data.to(device)
+# 			ori_pred_logits = pred_model(data.x, data.edge_index, data.batch)
+# 			ori_prob = F.softmax(ori_pred_logits, dim=1)[0]  # [num_classes]
+# 			ori_pred = ori_pred_logits.argmax(dim=1).item()
+# 			y_desired = 1 - ori_pred  # 反事实标签
+# 			y_desired_list.append(y_desired)
+# 			ori_graphs_list.append(data)
+# 			ori_prob_list.append(ori_prob)
+#
+# 	# 评估指标
+# 	valid_cf = 0
+# 	proximity_sum = 0.0
+# 	fidelity_prob_sum = 0.0  # 概率下降总和
+# 	sparsity_sum = 0.0
+# 	total_graphs = 0
+# 	successful_cf = 0
+#
+# 	print("\n2. Generating counterfactuals and computing metrics...")
+# 	for idx in tqdm(range(len(dataset))):
+# 		total_graphs += 1
+# 		ori_data = ori_graphs_list[idx]
+# 		x = ori_data.x
+# 		edge_index = ori_data.edge_index
+# 		batch = torch.zeros(x.size(0), dtype=torch.long, device=device)
+# 		y_desired = y_desired_list[idx]
+# 		ori_prob = ori_prob_list[idx]
+# 		ori_pred = 1 - y_desired  # 原始预测类
+#
+# 		# 原图的稠密邻接矩阵
+# 		ori_adj = to_dense_adj(edge_index, max_num_nodes=x.size(0)).squeeze(0).to(device)
+#
+# 		# 生成反事实邻接矩阵
+# 		y_pred_tensor = torch.tensor([ori_pred], device=device)  # 原始预测
+# 		cf_adj = explainer.run_one_graph(x, edge_index, batch, ori_adj, y_pred_tensor, epochs)
+#
+# 		# 将cf_adj转换为PyG Data格式
+# 		cf_edge_index, _ = dense_to_sparse(cf_adj)
+# 		cf_data = Data(
+# 			x=x.cpu(),
+# 			edge_index=cf_edge_index.cpu(),
+# 			num_nodes=x.size(0)
+# 		)
+#
+# 		# 1. Validity：检查CF图是否预测为目标类
+# 		with torch.no_grad():
+# 			cf_data_dev = cf_data.to(device)
+# 			cf_pred_logits = pred_model(
+# 				cf_data_dev.x,
+# 				cf_data_dev.edge_index,
+# 				torch.zeros(cf_data_dev.x.size(0), dtype=torch.long, device=device)
+# 			)
+# 			cf_prob = F.softmax(cf_pred_logits, dim=1)[0]  # [num_classes]
+# 			cf_pred = cf_pred_logits.argmax(dim=1).item()
+#
+# 		if cf_pred == y_desired:
+# 			valid_cf += 1
+# 			successful_cf += 1  # 这里表示“真正翻到目标类”的个数
+#
+# 		# 2. Proximity：计算原图和CF图的邻接矩阵距离
+# 		ori_adj_np = ori_adj.cpu().numpy()
+# 		cf_adj_np = cf_adj.cpu().numpy()
+#
+# 		# Frobenius范数
+# 		adj_diff = np.linalg.norm(ori_adj_np - cf_adj_np, ord='fro')
+#
+# 		# 归一化：用边数
+# 		m_ori = ori_data.num_edges // 2  # 无向图
+# 		m_cf = cf_data.num_edges // 2
+# 		max_m = max(m_ori, m_cf, 1)
+#
+# 		proximity = adj_diff / max_m
+# 		proximity_sum += proximity
+#
+# 		# 3. Fidelity (Probability)：原图对原始类的概率 - 反事实图对原始类的概率
+# 		ori_prob_on_ori_class = ori_prob[ori_pred].item()
+# 		cf_prob_on_ori_class = cf_prob[ori_pred].item()
+# 		fidelity_prob = ori_prob_on_ori_class - cf_prob_on_ori_class  # 概率下降量
+# 		fidelity_prob_sum += fidelity_prob
+#
+# 		# 4. Sparsity：计算原图和CF图的边集差异
+# 		ori_edge_set = set()
+# 		for i in range(edge_index.size(1)):
+# 			u, v = edge_index[0, i].item(), edge_index[1, i].item()
+# 			ori_edge_set.add((min(u, v), max(u, v)))
+#
+# 		cf_edge_set = set()
+# 		for i in range(cf_edge_index.size(1)):
+# 			u, v = cf_edge_index[0, i].item(), cf_edge_index[1, i].item()
+# 			cf_edge_set.add((min(u, v), max(u, v)))
+#
+# 		# 解释边 = 变化的边（原图有但CF没有 + CF有但原图没有）
+# 		exp_edges = ori_edge_set.symmetric_difference(cf_edge_set)
+#
+# 		num_exp_edges = len(exp_edges)
+# 		num_ori_edges = len(ori_edge_set)
+# 		sparsity = 1 - (num_exp_edges / max(num_ori_edges, 1))
+# 		sparsity_sum += sparsity
+#
+# 	# 计算平均指标
+# 	validity = valid_cf / total_graphs  # 仍然只看翻到目标类的比例
+# 	avg_proximity = proximity_sum / total_graphs
+# 	avg_fidelity_prob = fidelity_prob_sum / total_graphs
+# 	avg_sparsity = sparsity_sum / total_graphs
+#
+#
+# 	print("\n" + "="*60)
+# 	print("Evaluation Results:")
+# 	print("="*60)
+# 	print(f"  Validity ↑: {validity:.4f} (successful: {valid_cf}/{total_graphs})")
+# 	print(f"  Proximity ↓: {avg_proximity:.4f}")
+# 	print(f"  Fidelity (Prob Drop) ↑: {avg_fidelity_prob:.4f}")
+# 	print(f"  Sparsity ↑: {avg_sparsity:.4f}")
+# 	print(f"  CF Generation Rate: {successful_cf}/{total_graphs} ({successful_cf/max(total_graphs,1):.2%})")
+# 	print("="*60 + "\n")
+#
+# 	return {
+# 		"validity": validity,
+# 		"proximity": avg_proximity,
+# 		"fidelity_prob": avg_fidelity_prob,
+# 		"sparsity": avg_sparsity,
+# 		"successful": successful_cf,
+# 		"total": total_graphs,
+# 	}
+
 def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 	"""
-	评估CF-GNNExplainer，使用与MyExplainerV2相同的评估指标
-
-	参数：
-		pred_model: 预训练的GNN分类器
-		dataset: 验证/测试数据集
-		device: 计算设备
-		lr: CFGNNExplainer的学习率
-		epochs: 每个图的优化轮数
-
-	返回：
-		metrics: 包含validity, proximity, fidelity_prob, sparsity的字典
-	"""
+    评估CF-GNNExplainer
+    修改说明：
+    1. Validity: 仍然计算翻转成功的比例。
+    2. Proximity, Fidelity, Sparsity: 在所有样本上计算平均值（无论是否翻转成功）。
+    """
 	from torch_geometric.data import Batch, Data
 	from torch_geometric.utils import dense_to_sparse
+	import numpy as np
 
-	print("\n" + "="*60)
-	print("Evaluating CF-GNNExplainer")
-	print("="*60)
+	print("\n" + "=" * 60)
+	print("Evaluating CF-GNNExplainer (Metrics on ALL samples)")
+	print("=" * 60)
 
 	pred_model.eval()
 	explainer = CFExplainer(pred_model, device=device, lr=lr)
 
-	# 预计算所有图的原始预测和目标标签
+	# --- 1. 预计算阶段 ---
 	y_desired_list = []
 	ori_graphs_list = []
 	ori_prob_list = []
 
 	print("\n1. Computing original predictions...")
 	with torch.no_grad():
-		for data in tqdm(dataset):
+		for data in tqdm(dataset, desc="Pre-computing"):
 			data = data.to(device)
 			ori_pred_logits = pred_model(data.x, data.edge_index, data.batch)
 			ori_prob = F.softmax(ori_pred_logits, dim=1)[0]  # [num_classes]
 			ori_pred = ori_pred_logits.argmax(dim=1).item()
-			y_desired = 1 - ori_pred  # 反事实标签
+
+			# 假设二分类或多分类取反
+			y_desired = 1 - ori_pred
+
 			y_desired_list.append(y_desired)
 			ori_graphs_list.append(data)
 			ori_prob_list.append(ori_prob)
 
-	# 评估指标
-	valid_cf = 0
+	# --- 2. 评估循环 ---
+	valid_cf = 0  # 成功翻转的个数 (仅用于计算 Validity)
+	total_graphs = 0  # 总图数 (作为所有指标的分母)
+
 	proximity_sum = 0.0
-	fidelity_prob_sum = 0.0  # 概率下降总和
+	fidelity_prob_sum = 0.0
 	sparsity_sum = 0.0
-	total_graphs = 0
-	successful_cf = 0
 
 	print("\n2. Generating counterfactuals and computing metrics...")
-	for idx in tqdm(range(len(dataset))):
+	for idx in tqdm(range(len(dataset)), desc="Evaluating"):
 		total_graphs += 1
 		ori_data = ori_graphs_list[idx]
 		x = ori_data.x
 		edge_index = ori_data.edge_index
 		batch = torch.zeros(x.size(0), dtype=torch.long, device=device)
+
 		y_desired = y_desired_list[idx]
 		ori_prob = ori_prob_list[idx]
-		ori_pred = 1 - y_desired  # 原始预测类
+		ori_pred = 1 - y_desired
 
-		# 原图的稠密邻接矩阵
+		# 原图处理
 		ori_adj = to_dense_adj(edge_index, max_num_nodes=x.size(0)).squeeze(0).to(device)
 
-		# 生成反事实邻接矩阵
-		y_pred_tensor = torch.tensor([ori_pred], device=device)  # 原始预测
+		# 运行 Explainer 生成 CF
+		y_pred_tensor = torch.tensor([ori_pred], device=device)
 		cf_adj = explainer.run_one_graph(x, edge_index, batch, ori_adj, y_pred_tensor, epochs)
 
-		# 将cf_adj转换为PyG Data格式
+		# 转换格式
 		cf_edge_index, _ = dense_to_sparse(cf_adj)
 		cf_data = Data(
 			x=x.cpu(),
@@ -284,7 +438,7 @@ def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 			num_nodes=x.size(0)
 		)
 
-		# 1. Validity：检查CF图是否预测为目标类
+		# --- 检查 Validity ---
 		with torch.no_grad():
 			cf_data_dev = cf_data.to(device)
 			cf_pred_logits = pred_model(
@@ -292,35 +446,37 @@ def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 				cf_data_dev.edge_index,
 				torch.zeros(cf_data_dev.x.size(0), dtype=torch.long, device=device)
 			)
-			cf_prob = F.softmax(cf_pred_logits, dim=1)[0]  # [num_classes]
+			cf_prob = F.softmax(cf_pred_logits, dim=1)[0]
 			cf_pred = cf_pred_logits.argmax(dim=1).item()
 
+		# 只要预测类变成了目标类，就算 Valid
 		if cf_pred == y_desired:
 			valid_cf += 1
-			successful_cf += 1  # 这里表示“真正翻到目标类”的个数
 
-		# 2. Proximity：计算原图和CF图的邻接矩阵距离
+		# ==========================================================
+		# 修改：无论是否 Valid，都计算以下指标
+		# ==========================================================
+
+		# 1. Proximity Calculation
 		ori_adj_np = ori_adj.cpu().numpy()
 		cf_adj_np = cf_adj.cpu().numpy()
-
-		# Frobenius范数
 		adj_diff = np.linalg.norm(ori_adj_np - cf_adj_np, ord='fro')
 
-		# 归一化：用边数
-		m_ori = ori_data.num_edges // 2  # 无向图
+		m_ori = ori_data.num_edges // 2
 		m_cf = cf_data.num_edges // 2
-		max_m = max(m_ori, m_cf, 1)
+		max_m = max(m_ori, m_cf, 1)  # 避免除以0
 
 		proximity = adj_diff / max_m
 		proximity_sum += proximity
 
-		# 3. Fidelity (Probability)：原图对原始类的概率 - 反事实图对原始类的概率
+		# 2. Fidelity Calculation
+		# 关注原图预测类别的概率下降了多少 (即使没翻转，概率下降也是贡献)
 		ori_prob_on_ori_class = ori_prob[ori_pred].item()
 		cf_prob_on_ori_class = cf_prob[ori_pred].item()
-		fidelity_prob = ori_prob_on_ori_class - cf_prob_on_ori_class  # 概率下降量
+		fidelity_prob = ori_prob_on_ori_class - cf_prob_on_ori_class
 		fidelity_prob_sum += fidelity_prob
 
-		# 4. Sparsity：计算原图和CF图的边集差异
+		# 3. Sparsity Calculation
 		ori_edge_set = set()
 		for i in range(edge_index.size(1)):
 			u, v = edge_index[0, i].item(), edge_index[1, i].item()
@@ -331,44 +487,50 @@ def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 			u, v = cf_edge_index[0, i].item(), cf_edge_index[1, i].item()
 			cf_edge_set.add((min(u, v), max(u, v)))
 
-		# 解释边 = 变化的边（原图有但CF没有 + CF有但原图没有）
+		# 变化的边数
 		exp_edges = ori_edge_set.symmetric_difference(cf_edge_set)
-
 		num_exp_edges = len(exp_edges)
 		num_ori_edges = len(ori_edge_set)
+
+		# Sparsity定义：1 - (改变的边 / 原有的边)
 		sparsity = 1 - (num_exp_edges / max(num_ori_edges, 1))
 		sparsity_sum += sparsity
 
-	# 计算平均指标
-	validity = valid_cf / total_graphs  # 仍然只看翻到目标类的比例
-	avg_proximity = proximity_sum / total_graphs
-	avg_fidelity_prob = fidelity_prob_sum / total_graphs
-	avg_sparsity = sparsity_sum / total_graphs
+	# --- 3. 结果汇总 ---
+	# Validity: 成功数 / 总数
+	validity = valid_cf / total_graphs if total_graphs > 0 else 0.0
 
+	# 其他指标: 总和 / 总数 (不再是 valid_cf)
+	if total_graphs > 0:
+		avg_proximity = proximity_sum / total_graphs
+		avg_fidelity_prob = fidelity_prob_sum / total_graphs
+		avg_sparsity = sparsity_sum / total_graphs
+	else:
+		avg_proximity = 0.0
+		avg_fidelity_prob = 0.0
+		avg_sparsity = 0.0
 
-	print("\n" + "="*60)
-	print("Evaluation Results:")
-	print("="*60)
-	print(f"  Validity ↑: {validity:.4f} (successful: {valid_cf}/{total_graphs})")
-	print(f"  Proximity ↓: {avg_proximity:.4f}")
-	print(f"  Fidelity (Prob Drop) ↑: {avg_fidelity_prob:.4f}")
-	print(f"  Sparsity ↑: {avg_sparsity:.4f}")
-	print(f"  CF Generation Rate: {successful_cf}/{total_graphs} ({successful_cf/max(total_graphs,1):.2%})")
-	print("="*60 + "\n")
+	print("\n" + "=" * 60)
+	print("Evaluation Results (Calculated on ALL Samples):")
+	print("=" * 60)
+	print(f"  Validity ↑: {validity:.4f} ({valid_cf}/{total_graphs})")
+	print(f"  Proximity (avg all) ↓: {avg_proximity:.4f}")
+	print(f"  Fidelity (avg all) ↑: {avg_fidelity_prob:.4f}")
+	print(f"  Sparsity (avg all) ↑: {avg_sparsity:.4f}")
+	print("=" * 60 + "\n")
 
 	return {
 		"validity": validity,
 		"proximity": avg_proximity,
 		"fidelity_prob": avg_fidelity_prob,
 		"sparsity": avg_sparsity,
-		"successful": successful_cf,
+		"successful": valid_cf,
 		"total": total_graphs,
 	}
 
-
 if __name__ == "__main__":
-	dataset_name = 'ba2motif'
-	device = 'cuda:1'
+	dataset_name = 'nci1'
+	device = 'cuda:2'
 
 	print("\n1. Loading datasets...")
 	train_dataset, val_dataset, test_dataset = get_datasets(name=dataset_name, root='../data/')

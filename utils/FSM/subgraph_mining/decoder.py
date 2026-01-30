@@ -111,6 +111,10 @@ def pattern_growth(dataset, task, args, label=None):
                 for u, v, data in graph_nx.edges(data=True):
                     if 'edge_attr' in data and isinstance(data['edge_attr'], list):
                         data['edge_attr'] = torch.tensor(data['edge_attr'], dtype=torch.float32)  # 假设 float32，匹配 GNN
+            elif args.dataset == "benzene":
+                # ✅ benzene 数据集：只保留节点特征，忽略边属性
+                # 频繁子图挖掘主要关注图结构，不需要边属性
+                graph_nx = pyg_utils.to_networkx(graph, node_attrs=['x']).to_undirected()
             else:
                 # ✅ 修复：为所有数据集保留节点特征和边特征
                 graph_nx = pyg_utils.to_networkx(graph, node_attrs=['x']).to_undirected()

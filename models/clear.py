@@ -90,15 +90,15 @@ def predict_with_dense_format(
 
 class GraphCFE(nn.Module):
     def __init__(
-        self,
-        pred_model: nn.Module,
-        x_dim: int,
-        edge_attr_dim: int,
-        h_dim: int,
-        z_dim: int,
-        max_num_nodes: int,
-        dropout: float,
-        device: str
+            self,
+            pred_model: nn.Module,
+            x_dim: int,
+            edge_attr_dim: int,
+            h_dim: int,
+            z_dim: int,
+            max_num_nodes: int,
+            dropout: float,
+            device: str
     ):
         super(GraphCFE, self).__init__()
         self.pred_model = pred_model
@@ -110,35 +110,24 @@ class GraphCFE(nn.Module):
         self.dropout = dropout
         self.device = device
 
-        # GCN 图编码层（Dense 格式）
+        # ============================================================
+        # Encoder: 依然需要同时看 Features 和 Adjacency 来理解图语义
+        # ============================================================
         self.graph_model = DenseGCNConv(x_dim, h_dim)
+        self.graph_norm = nn.BatchNorm1d(h_dim)
 
-        # encoder: 输出均值和 log 方差
         self.encoder_mean = nn.Sequential(
             nn.Linear(h_dim, z_dim),
             nn.BatchNorm1d(z_dim),
             nn.ReLU()
         )
-        # 用更标准的 logvar，直接 Linear 即可（不再用 Sigmoid）
         self.encoder_logvar = nn.Linear(h_dim, z_dim)
 
-        # 用于图级表示的 BN
-        self.graph_norm = nn.BatchNorm1d(h_dim)
+        # ============================================================
+        # Decoder: 【修改】只保留 decoder_a (邻接矩阵解码器)
+        # ============================================================
+        # 注意：这里移除了 self.decoder_x
 
-        # decoder for node features
-        self.decoder_x = nn.Sequential(
-            nn.Linear(z_dim, h_dim),
-            nn.BatchNorm1d(h_dim),
-            nn.Dropout(dropout),
-            nn.ReLU(),
-            nn.Linear(h_dim, h_dim),
-            nn.BatchNorm1d(h_dim),
-            nn.Dropout(dropout),
-            nn.ReLU(),
-            nn.Linear(h_dim, max_num_nodes * x_dim)
-        )
-
-        # decoder for adjacency (upper triangle vector)
         self.decoder_a = nn.Sequential(
             nn.Linear(z_dim, h_dim),
             nn.BatchNorm1d(h_dim),
@@ -152,7 +141,7 @@ class GraphCFE(nn.Module):
             nn.Sigmoid()
         )
 
-        # decoder for edge attributes（可选，目前不参与 loss，仅保留结构）
+        # 如果有边属性需要重构，保留 decoder_edge_attr，否则忽略
         if edge_attr_dim != 0:
             self.decoder_edge_attr = nn.Sequential(
                 nn.Linear(z_dim, h_dim),
@@ -163,10 +152,7 @@ class GraphCFE(nn.Module):
                 nn.BatchNorm1d(h_dim),
                 nn.Dropout(dropout),
                 nn.ReLU(),
-                nn.Linear(
-                    h_dim,
-                    int((max_num_nodes - 1) * max_num_nodes / 2) * edge_attr_dim
-                )
+                nn.Linear(h_dim, int((max_num_nodes - 1) * max_num_nodes / 2) * edge_attr_dim)
             )
         else:
             self.decoder_edge_attr = None
@@ -174,7 +160,6 @@ class GraphCFE(nn.Module):
         self.initialize_parameters()
 
     def initialize_parameters(self):
-        """参数初始化"""
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 init.xavier_uniform_(m.weight)
@@ -185,66 +170,36 @@ class GraphCFE(nn.Module):
                 init.constant_(m.bias, 0)
 
     def encoder(self, features: torch.Tensor, adj: torch.Tensor):
-        """
-        features: [B, N, x_dim]
-        adj:      [B, N, N]
-        """
-        # DenseGCNConv: (x: [B, N, F], adj: [B, N, N]) -> [B, N, h_dim]
-        graph_rep = self.graph_model(features, adj)      # [B, N, h_dim]
-        graph_rep = torch.sum(graph_rep, dim=1)          # [B, h_dim]
-        graph_rep = self.graph_norm(graph_rep)           # [B, h_dim]
-
-        z_mu = self.encoder_mean(graph_rep)              # [B, z_dim]
-        z_logvar = self.encoder_logvar(graph_rep)        # [B, z_dim] 真实 logvar
+        # Encoder 保持不变，需要利用图结构和节点特征生成 Latent Z
+        graph_rep = self.graph_model(features, adj)  # [B, N, h_dim]
+        graph_rep = torch.sum(graph_rep, dim=1)  # [B, h_dim]
+        graph_rep = self.graph_norm(graph_rep)
+        z_mu = self.encoder_mean(graph_rep)
+        z_logvar = self.encoder_logvar(graph_rep)
         return z_mu, z_logvar
 
     def convert_to_symmetric_tensor(self, num_nodes: int, adj_vec: torch.Tensor):
-        """
-        adj_vec: [B, num_edges], num_edges = N*(N-1)/2 (上三角不含对角线)
-        返回对称矩阵 [B, N, N]
-        """
-        upper_triangular = torch.zeros(
-            (adj_vec.shape[0], num_nodes, num_nodes),
-            device=self.device
-        )
-        # 上三角索引（offset=1 表示不包含对角线）
+        upper_triangular = torch.zeros((adj_vec.shape[0], num_nodes, num_nodes), device=self.device)
         mask = torch.triu_indices(num_nodes, num_nodes, offset=1).to(self.device)
         upper_triangular[:, mask[0], mask[1]] = adj_vec
-        # 对称
         symm = upper_triangular + torch.transpose(upper_triangular, 1, 2)
         return symm
 
     def decoder(self, z: torch.Tensor):
-        """
-        z: [B, z_dim]
-        """
-        # 邻接
-        adj_reconst_half = self.decoder_a(z)      # [B, num_edges]
-        adj_reconst = self.convert_to_symmetric_tensor(
-            self.max_num_nodes, adj_reconst_half
-        )                                         # [B, N, N]
+        # 【修改】Decoder 只解码 adj，不再解码 features
+        adj_reconst_half = self.decoder_a(z)
+        adj_reconst = self.convert_to_symmetric_tensor(self.max_num_nodes, adj_reconst_half)
 
-        # 节点特征
-        features_reconst = self.decoder_x(z).view(
-            -1, self.max_num_nodes, self.x_dim
-        )                                         # [B, N, x_dim]
-
-        # 边属性（目前没有用于 loss，仅返回）
         if self.decoder_edge_attr is not None:
             edge_attrs_reconst = self.decoder_edge_attr(z).view(
-                -1,
-                int(self.max_num_nodes * (self.max_num_nodes - 1) / 2),
-                self.edge_attr_dim
+                -1, int(self.max_num_nodes * (self.max_num_nodes - 1) / 2), self.edge_attr_dim
             )
         else:
             edge_attrs_reconst = None
 
-        return features_reconst, adj_reconst, edge_attrs_reconst
+        return adj_reconst, edge_attrs_reconst
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor):
-        """
-        z = mu + std * epsilon
-        """
         if self.training:
             std = torch.exp(0.5 * logvar)
             eps = torch.randn_like(std)
@@ -253,81 +208,61 @@ class GraphCFE(nn.Module):
             return mu
 
     def forward(self, features: torch.Tensor, adj: torch.Tensor) -> Dict[str, torch.Tensor]:
-        # encoder
         z_mu, z_logvar = self.encoder(features, adj)
-        # 采样
         z_sample = self.reparameterize(z_mu, z_logvar)
-        # decoder
-        features_reconst, adj_reconst, edge_attrs_reconst = self.decoder(z_sample)
+
+        # Decoder 仅返回结构
+        adj_reconst, edge_attrs_reconst = self.decoder(z_sample)
+
         return {
             'z_mu': z_mu,
             'z_logvar': z_logvar,
             'adj_reconst': adj_reconst,
-            'feat_reconst': features_reconst,
+            'feat_reconst': features,  # 【关键】直接返回原始特征，不修改
             'edge_attr_reconst': edge_attrs_reconst
         }
 
     def loss(
-        self,
-        feat: torch.Tensor,
-        adj: torch.Tensor,
-        explainer_output: Dict[str, torch.Tensor],
-        cf_label: torch.Tensor
+            self,
+            feat: torch.Tensor,
+            adj: torch.Tensor,
+            explainer_output: Dict[str, torch.Tensor],
+            cf_label: torch.Tensor
     ) -> Dict[str, torch.Tensor]:
-        """
-        feat: 原始节点特征 [B, N, x_dim]
-        adj:  原始邻接        [B, N, N]
-        cf_label: 目标反事实标签 [B]，目前假定为二分类中的目标类（0/1）
-        """
+
         B = feat.shape[0]
 
-        # ========== 1) KL loss（标准 VAE KL）==========
-        z_mu = explainer_output['z_mu']          # [B, z_dim]
-        z_logvar = explainer_output['z_logvar']  # [B, z_dim]
+        # 1. KL Loss
+        z_mu = explainer_output['z_mu']
+        z_logvar = explainer_output['z_logvar']
+        loss_kl = -0.5 * torch.sum(1 + z_logvar - z_mu.pow(2) - torch.exp(z_logvar), dim=1).mean()
 
-        # KL( N(mu, sigma^2) || N(0, I) )
-        # = -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
-        loss_kl = -0.5 * torch.sum(
-            1 + z_logvar - z_mu.pow(2) - torch.exp(z_logvar),
-            dim=1
-        ).mean()
+        # 2. Similarity Loss (仅针对 Adjacency)
+        # 【修改】彻底移除 dist_x，只计算 dist_a
+        dist_a = F.binary_cross_entropy(explainer_output['adj_reconst'], adj)
+        loss_sim = 10.0 * dist_a  # 这里的系数可以根据需要调整
 
-        # ========== 2) similarity loss ==========
-        # 特征距离（对所有实际节点 & pad 节点统一处理）
-        dist_x = F.pairwise_distance(
-            feat.view(B, -1),
-            explainer_output['feat_reconst'].view(B, -1),
-            p=2
-        ).mean()
-        # 邻接 BCE
-        dist_a = F.binary_cross_entropy(
-            explainer_output['adj_reconst'],
-            adj
-        )
-        loss_sim = 0.0 * dist_x + 10.0 * dist_a
+        # 3. CFE Loss (Counterfactual Prediction Loss)
+        # 使用原始特征 (feat) 和 重构的邻接 (adj_reconst)
 
-        # ========== 3) CFE loss（用 pred_model 在 CF 图上的预测）==========
+        # 准备数据给 pred_model
+        # 注意：这里 explainer_output['feat_reconst'] 已经是原始 feat 了，所以逻辑是自洽的
+        feat_for_pred = explainer_output['feat_reconst']
+        adj_reconst = explainer_output['adj_reconst']
+
+        # 将 adj_reconst (Dense) 转为 PyG 格式
         from torch_geometric.utils import dense_to_sparse
-
-        feat_reconst = explainer_output['feat_reconst']  # [B, N, x_dim]
-        adj_reconst = explainer_output['adj_reconst']  # [B, N, N]
-
-        B = feat_reconst.size(0)
-        N = feat_reconst.size(1)
-
-        # [B*N, x_dim]
-        x_sparse = feat_reconst.view(B * N, -1)
+        x_sparse = feat_for_pred.view(B * feat.size(1), -1)
 
         edge_index_list = []
         edge_weight_list = []
         batch_vec_list = []
         offset = 0
+        N = feat.size(1)
 
         for b in range(B):
-            adj_b = adj_reconst[b]  # [N, N]，范围在 (0,1)（decoder_a 最后一层是 Sigmoid）
-            # 不再硬阈值，直接当成连续权重
-            edge_index_b, edge_weight_b = dense_to_sparse(adj_b)  # [2, E_b], [E_b]
-
+            adj_b = adj_reconst[b]
+            edge_index_b, edge_weight_b = dense_to_sparse(adj_b)
             edge_index_list.append(edge_index_b + offset)
             edge_weight_list.append(edge_weight_b)
             batch_vec_list.extend([b] * N)
@@ -340,30 +275,29 @@ class GraphCFE(nn.Module):
             edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
             edge_weight = torch.empty((0,), dtype=torch.float, device=self.device)
 
-        batch_vec = torch.tensor(batch_vec_list, dtype=torch.long, device=self.device)  # [B*N]
+        batch_vec = torch.tensor(batch_vec_list, dtype=torch.long, device=self.device)
 
-        # 使用 get_pred_explain，让 edge_weight 作为 edge_mask 参与预测
-        # ✅ 参照 CF-GNNExplainer：使用位置参数，edge_weight 已在 [0,1] 范围，无需设置 mask_is_logit
-        probs_cf, y_pred_logits = self.pred_model.get_pred_explain(
+        # 预测
+        _, y_pred_logits = self.pred_model.get_pred_explain(
             x_sparse.to(self.device),
             edge_index,
-            edge_weight,  # 第3个位置参数：edge_mask（范围 [0,1]，来自 sigmoid 后的 adj_reconst）
-            batch_vec     # 第4个位置参数：batch
+            edge_weight,
+            batch_vec
         )
 
-        loss_cfe = F.nll_loss(
+        loss_cfe = 10 * F.nll_loss(
             F.log_softmax(y_pred_logits, dim=-1),
             cf_label.view(-1).long()
         )
 
         loss = loss_sim + loss_kl + loss_cfe
-        loss_results = {
+
+        return {
             'loss': loss,
             'loss_kl': loss_kl,
             'loss_sim': loss_sim,
             'loss_cfe': loss_cfe
         }
-        return loss_results
 
     def run_one_batch(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         from torch_geometric.utils import to_dense_batch
@@ -592,56 +526,45 @@ def generate_cfs_with_graphcfe(
 # 5. 评估：参照 CF-GNNExplainer 的正确模式
 ##############################################
 
+
 @torch.no_grad()
 def evaluate_graphcfe(
-    pred_model: nn.Module,
-    explainer: GraphCFE,
-    eval_dataset: InMemoryDataset,
-    device: str
+        pred_model: nn.Module,
+        explainer: GraphCFE,
+        eval_dataset: InMemoryDataset,
+        device: str
 ) -> Dict[str, float]:
-    """
-    在 eval_dataset 上评估 GraphCFE
-
-    ✅ 参照 CF-GNNExplainer 的正确实现：
-      - 直接遍历 dataset（不使用 DataLoader）
-      - 对所有图计算指标（分母是 total_graphs，不是 successful_cf）
-      - proximity 使用实际边数归一化（不是 adj.sum()）
-      - 添加 tqdm 进度条
-      - 使用实际节点数（不是固定的 max_num_nodes）
-
-    评估指标：
-      - validity:   CF 是否预测为目标类（y_desired = 1 - ori_pred）
-      - proximity:  原图/CF 图邻接的 Frobenius 距离（用边数归一化）
-      - fidelity_prob: 原类概率下降量
-      - sparsity:   边修改的稀疏性
-    """
-    from torch_geometric.utils import dense_to_sparse
-
-    print("\n" + "="*60)
-    print("Evaluating GraphCFE")
-    print("="*60)
+    print("\n" + "=" * 60)
+    print("Evaluating GraphCFE (Topology-Only)")
+    print("=" * 60)
 
     pred_model.eval()
     explainer.eval()
 
-    # 1. 预计算所有图的原始预测和概率
+    # 1. 预计算原始预测
     ori_probs = []
     ori_preds = []
     ori_edge_indices = []
 
-    print("\n1. Computing original predictions...")
+    # 我们仍然保存一份原始特征，双重保险
+    ori_features = []
+
     for data in tqdm(eval_dataset, desc="Original predictions"):
         data = data.to(device)
-        ori_pred_logits = pred_model(data.x, data.edge_index, data.batch)
-        ori_prob = F.softmax(ori_pred_logits, dim=1)[0]  # [num_classes]
+        # 手动构建 batch 防止 data.batch 为 None
+        batch_vec = torch.zeros(data.x.size(0), dtype=torch.long, device=device)
+
+        ori_pred_logits = pred_model(data.x, data.edge_index, batch_vec)
+        ori_prob = F.softmax(ori_pred_logits, dim=1)[0]
         ori_pred = ori_pred_logits.argmax(dim=1).item()
 
         ori_probs.append(ori_prob.cpu())
         ori_preds.append(ori_pred)
         ori_edge_indices.append(data.edge_index.cpu())
+        ori_features.append(data.x.cpu())
 
-    # 2. 生成 CF
-    print("\n2. Generating counterfactuals...")
+        # 2. 生成 CF
+    # 注意：现在 explainer 内部只生成 adj_reconst，feat_reconst 只是 copy
     cf_feat_list, cf_adj_list, graph_idx_list = \
         generate_cfs_with_graphcfe(pred_model, explainer, eval_dataset, device)
 
@@ -650,97 +573,81 @@ def evaluate_graphcfe(
     proximity_sum = 0.0
     fidelity_prob_sum = 0.0
     sparsity_sum = 0.0
-    total_graphs = len(eval_dataset)  # ✅ 关键：分母是所有图
+    total_graphs = len(eval_dataset)
 
-    print("\n3. Computing evaluation metrics...")
     for idx in tqdm(range(len(eval_dataset)), desc="Computing metrics"):
+        # 基础数据准备
         ori_edge_index = ori_edge_indices[idx].to(device)
         ori_prob = ori_probs[idx].to(device)
         ori_pred = ori_preds[idx]
 
-        # 获取对应的 CF
-        cf_feat = cf_feat_list[idx].to(device)  # [N, x_dim]
-        cf_adj = cf_adj_list[idx].to(device)    # [N, N]
-        cf_adj = (cf_adj > 0.5).float()  # 二值化
+        # 强制使用原始特征 (虽然 cf_feat_list[idx] 现在也应该是原始特征，但这样写更清晰)
+        cf_feat = ori_features[idx].to(device)
 
-        # 将 cf_adj 转换为 edge_index
-        cf_edge_index, _ = dense_to_sparse(cf_adj)
+        # CF 边结构
+        cf_adj = cf_adj_list[idx].to(device)
+        cf_adj = (cf_adj > 0.5).float()  # 这里的阈值可以调整
+        cf_edge_index, _ = to_dense_adj_sparse_format_helper(cf_adj)  # 下面提供个helper防止import报错
 
-        # CF 的预测
-        num_nodes = cf_feat.size(0)
-        batch_vec = torch.zeros(num_nodes, dtype=torch.long, device=device)
+        # CF 预测
+        batch_vec = torch.zeros(cf_feat.size(0), dtype=torch.long, device=device)
         cf_pred_logits = pred_model(cf_feat, cf_edge_index, batch_vec)
-        cf_prob = F.softmax(cf_pred_logits, dim=1)[0]  # [num_classes]
+        cf_prob = F.softmax(cf_pred_logits, dim=1)[0]
         cf_pred = cf_pred_logits.argmax(dim=1).item()
 
-        # 1) Validity：CF 是否预测为目标类
-        y_desired = 1 - ori_pred  # ✅ 反事实标签
+        # --- 指标计算 (保持不变) ---
+        y_desired = 1 - ori_pred
         if cf_pred == y_desired:
             valid_cf += 1
 
-        # 2) Proximity：原邻接 / CF 邻接的 Frobenius 距离（用边数归一化）
-        # ✅ 关键：使用实际边数，不是 adj.sum()
-        ori_adj = to_dense_adj(ori_edge_index, max_num_nodes=num_nodes).squeeze(0)
-        ori_adj_np = ori_adj.cpu().numpy()
-        cf_adj_np = cf_adj.cpu().numpy()
+        # Proximity
+        ori_adj = to_dense_adj(ori_edge_index, max_num_nodes=cf_feat.size(0)).squeeze(0)
+        adj_diff = torch.norm(ori_adj - cf_adj, p='fro').item()
+        max_m = max(ori_edge_index.size(1) // 2, cf_edge_index.size(1) // 2, 1)
+        proximity_sum += (adj_diff / max_m)
 
-        adj_diff = np.linalg.norm(ori_adj_np - cf_adj_np, ord='fro')
+        # Fidelity
+        fidelity_prob_sum += (ori_prob[ori_pred].item() - cf_prob[ori_pred].item())
 
-        # ✅ 使用实际边数（参照 CF-GNNExplainer）
-        m_ori = ori_edge_index.size(1) // 2  # 无向图
-        m_cf = cf_edge_index.size(1) // 2
-        max_m = max(m_ori, m_cf, 1)
+        # Sparsity
+        sparsity_sum += calculate_sparsity(ori_edge_index, cf_edge_index)  # 封装一下之前的逻辑
 
-        proximity = adj_diff / max_m
-        proximity_sum += proximity
-
-        # 3) Fidelity_prob：原类概率下降量
-        ori_prob_on_ori_class = ori_prob[ori_pred].item()
-        cf_prob_on_ori_class = cf_prob[ori_pred].item()
-        fidelity_prob = ori_prob_on_ori_class - cf_prob_on_ori_class
-        fidelity_prob_sum += fidelity_prob
-
-        # 4) Sparsity：边修改的比例
-        ori_edge_set = set()
-        for i in range(ori_edge_index.size(1)):
-            u, v = ori_edge_index[0, i].item(), ori_edge_index[1, i].item()
-            ori_edge_set.add((min(u, v), max(u, v)))
-
-        cf_edge_set = set()
-        for i in range(cf_edge_index.size(1)):
-            u, v = cf_edge_index[0, i].item(), cf_edge_index[1, i].item()
-            cf_edge_set.add((min(u, v), max(u, v)))
-
-        exp_edges = ori_edge_set.symmetric_difference(cf_edge_set)
-        num_exp_edges = len(exp_edges)
-        num_ori_edges = len(ori_edge_set)
-        sparsity = 1 - (num_exp_edges / max(num_ori_edges, 1))
-        sparsity_sum += sparsity
-
-    # ✅ 关键：validity 的分母是 total_graphs（所有图），不是 len(cf_feat_list)
-    validity = valid_cf / total_graphs
-    avg_proximity = proximity_sum / total_graphs
-    avg_fidelity_prob = fidelity_prob_sum / total_graphs
-    avg_sparsity = sparsity_sum / total_graphs
-
-    print("\n" + "="*60)
-    print("Evaluation Results:")
-    print("="*60)
-    print(f"  Validity ↑: {validity:.4f} (successful: {valid_cf}/{total_graphs})")
-    print(f"  Proximity ↓: {avg_proximity:.4f}")
-    print(f"  Fidelity (Prob Drop) ↑: {avg_fidelity_prob:.4f}")
-    print(f"  Sparsity ↑: {avg_sparsity:.4f}")
-    print(f"  CF Generation Rate: {len(cf_feat_list)}/{total_graphs} ({len(cf_feat_list)/max(total_graphs,1):.2%})")
-    print("="*60 + "\n")
-
-    return {
-        "validity": validity,
-        "proximity": avg_proximity,
-        "fidelity_prob": avg_fidelity_prob,
-        "sparsity": avg_sparsity,
-        "successful": valid_cf,
-        "total": total_graphs,
+    # 汇总
+    results = {
+        "validity": valid_cf / total_graphs,
+        "proximity": proximity_sum / total_graphs,
+        "fidelity_prob": fidelity_prob_sum / total_graphs,
+        "sparsity": sparsity_sum / total_graphs
     }
+
+    print(f"Results: {results}")
+    return results
+
+
+# 辅助函数：防止 import 错误
+def to_dense_adj_sparse_format_helper(adj_binary):
+    from torch_geometric.utils import dense_to_sparse
+    return dense_to_sparse(adj_binary)
+
+
+def calculate_sparsity(ori_edge_index, cf_edge_index):
+    # 原先的 Sparsity 计算逻辑
+    ori_edge_set = set()
+    for i in range(ori_edge_index.size(1)):
+        u, v = ori_edge_index[0, i].item(), ori_edge_index[1, i].item()
+        ori_edge_set.add((min(u, v), max(u, v)))
+
+    cf_edge_set = set()
+    for i in range(cf_edge_index.size(1)):
+        u, v = cf_edge_index[0, i].item(), cf_edge_index[1, i].item()
+        cf_edge_set.add((min(u, v), max(u, v)))
+
+    num_ori = len(ori_edge_set)
+    if num_ori == 0: return 0.0
+
+    # 编辑距离 / 原边数
+    diff = ori_edge_set.symmetric_difference(cf_edge_set)
+    return 1.0 - (len(diff) / num_ori)
 
 
 ##############################################
@@ -749,7 +656,7 @@ def evaluate_graphcfe(
 
 if __name__ == "__main__":
 
-    dataset_name = "mutag"
+    dataset_name = "nci1"
     device = "cuda:1" if torch.cuda.is_available() else "cpu"
 
     # ===== 1. 加载/构造 GraphDataset =====

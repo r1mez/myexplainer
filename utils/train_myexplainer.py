@@ -10,7 +10,6 @@ from tqdm import tqdm
 import os
 from datetime import datetime
 
-from evaluation import evaluate
 from utils import compute_loss, concat_graphs
 import time
 
@@ -707,7 +706,7 @@ def train_myexplainer_with_causality(args, model, gnn, train_loader, eval_loader
 
 
 
-def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, epochs=30):
+def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, scheduler, epochs=30):
     # 记录损失历史
     losses = {
         'total': [],
@@ -717,9 +716,10 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
         # 'edit_outside': [],
         'cf': [],
         'kl': [],
+        'val_total': []
     }
 
-    best_loss = float('inf')
+    best_val_loss = float('inf')
     best_epoch = 0
 
 
@@ -831,10 +831,37 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
             epoch_losses[key] /= num_batches
             losses[key].append(epoch_losses[key])
 
-        # 可视化：每个epoch结束时，绘制示例图的原始和重构版本
+        model.eval()  # 切换到评估模式
+        val_loss_accum = 0.0
+        val_batches = 0
+
+        with torch.no_grad():  # 不计算梯度
+            for batch in eval_loader:
+                origraphs = batch['graphs'].to(args.device)
+                subgraphs = [g.to(args.device) for g in batch['subgraphs']]
+
+                # 验证集也需要计算目标标签 (实时计算，因为cache里只有train的)
+                ori_pred_logits, _ = gnn.get_pred(origraphs.x, origraphs.edge_index, origraphs.batch)
+                ori_pred = ori_pred_logits.argmax(dim=1)
+                y_desired = (1 - ori_pred).float().unsqueeze(1)
+
+                outputs = model(origraphs, subgraphs)
+                loss_dict = model.compute_loss(args, origraphs, y_desired, outputs)
+
+                val_loss_accum += loss_dict["total"].item()
+                val_batches += 1
+
+        # 计算验证集平均 Loss
+        val_epoch_loss = val_loss_accum / val_batches if val_batches > 0 else 0.0
+        losses['val_total'].append(val_epoch_loss)
+
+        scheduler.step(val_epoch_loss)
+
 
         # 打印epoch总结
         print(f"\nEpoch {epoch + 1}/{epochs} Summary:")
+        print(f"  Train Total Loss: {epoch_losses['total']:.4f}")
+        print(f"  Val   Total Loss: {val_epoch_loss:.4f}")
         for loss_name, loss_value in epoch_losses.items():
             # Skip the mask loss if it's commented out in the original
             if loss_name != 'mask':
@@ -842,11 +869,11 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
 
 
         # 保存最佳模型
-        if epoch_losses['total'] < best_loss:
-            best_loss = epoch_losses['total']
+        if val_epoch_loss < best_val_loss:
+            best_val_loss = val_epoch_loss
             best_epoch = epoch + 1
             torch.save(model.state_dict(), f'param/myexplainer_{args.dataset}_best.pt')
-            print(f"  *** Saved best model with loss {best_loss:.4f} ***")
+            print(f"  *** Saved Best Model (Val Loss: {best_val_loss:.4f}) ***")
 
 
         # 定期保存checkpoint
@@ -864,7 +891,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
     # 加载最佳模型
     model.load_state_dict(torch.load(f'param/myexplainer_{args.dataset}_best.pt'))
     print("\nTraining completed! Loaded best model.")
-    print(f"Best model from epoch {best_epoch} with loss {best_loss:.4f}")
+    print(f"Best model from epoch {best_epoch} with loss {best_val_loss:.4f}")
 
     # 绘制损失曲线
     # epochs_range = range(1, epochs + 1)
@@ -887,7 +914,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
     # plt.close()
 
     epochs_range = range(1, epochs + 1)
-    loss_types = ['total', 'recon', 'kl', 'cf']
+    loss_types = ['total', 'recon', 'kl', 'cf','val_total']
 
     for loss_type in loss_types:
         plt.figure(figsize=(10, 6))

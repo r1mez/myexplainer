@@ -653,19 +653,11 @@ class MyExplainerV2(nn.Module):
             return mu
 
     def run_fs_vgae(
-        self, node_rep, edge_index, batch, fs_nodes_bool,
-        max_cand_per_graph=None
+            self, node_rep, edge_index, batch, fs_nodes_bool,
+            max_cand_per_graph=None
     ):
         """
-        在每个图 g 的 FS 节点集合 S_g 上跑一个小 VGAE：
-          - 输入：node_rep[S_g]
-          - encoder: μ, logvar
-          - decoder: 内积 -> p_ij
-          - 监督：recon A_fs (FS 内真实邻接)
-          - 输出：
-              cand_src, cand_dst（全局 idx）
-              p_add（对应候选加边概率）
-              add_recon_loss, add_kl_loss
+        修正版：训练阶段保留梯度流，不做硬阈值截断。
         """
         device = node_rep.device
         row, col = edge_index
@@ -695,27 +687,24 @@ class MyExplainerV2(nn.Module):
                 continue
 
             # 1) 取 FS 节点的表示和子图邻接
-            h_g = node_rep[fs_idx_g]                   # [n_fg, h_dim]
-            A_g = adj_global[fs_idx_g][:, fs_idx_g]    # [n_fg, n_fg]
+            h_g = node_rep[fs_idx_g]  # [n_fg, h_dim]
+            A_g = adj_global[fs_idx_g][:, fs_idx_g]  # [n_fg, n_fg]
 
             # 2) VGAE encoder: μ, logvar
-            mu_g = self.vgae_mu(h_g)                   # [n_fg, z_dim]
-            logvar_g = self.vgae_logvar(h_g)           # [n_fg, z_dim]
+            mu_g = self.vgae_mu(h_g)  # [n_fg, z_dim]
+            logvar_g = self.vgae_logvar(h_g)  # [n_fg, z_dim]
             z_g = self.vgae_reparameterize(mu_g, logvar_g)  # [n_fg, z_dim]
 
             # 3) VGAE decoder: 内积解码，得到完整邻接概率矩阵
-            #    logits: [n_fg, n_fg]
             logits_A = torch.matmul(z_g, z_g.t())
             prob_A = torch.sigmoid(logits_A)
 
-            # 4) 重构损失 (简单版本：对上三角所有位置做 BCE)
+            # 4) 重构损失
             triu_mask = torch.triu(torch.ones_like(A_g, dtype=torch.bool), diagonal=1)
-            A_pos = A_g[triu_mask]             # [M_triu]
-            P_pos = prob_A[triu_mask]         # [M_triu]
+            A_pos = A_g[triu_mask]
+            P_pos = prob_A[triu_mask]
 
-            # class imbalance 可能很严重，可以加 pos_weight
             if A_pos.numel() > 0:
-                # 统计正负样本
                 num_pos = (A_pos == 1).sum().item()
                 num_neg = (A_pos == 0).sum().item()
                 if num_pos == 0:
@@ -730,40 +719,58 @@ class MyExplainerV2(nn.Module):
             else:
                 recon_loss_g = torch.tensor(0.0, device=device)
 
-            # 5) KL loss（节点级 VAE）
+            # 5) KL loss
             kl_g = -0.5 * torch.mean(1 + logvar_g - mu_g.pow(2) - logvar_g.exp())
 
             recon_losses.append(recon_loss_g)
             kl_losses.append(kl_g)
 
             # 6) 从 FS 内部的非边里提取候选加边
-            cand_mask = (A_g == 0) & triu_mask   # 非边 & 上三角
+            cand_mask = (A_g == 0) & triu_mask  # 非边 & 上三角
             if not cand_mask.any():
                 continue
 
-            scores = prob_A[cand_mask]                  # [M_cand]
-            cand_idx = cand_mask.nonzero(as_tuple=False)  # [M_cand, 2]
+            # 获取所有非边的 score 和 index
+            # 注意：这里不要急着过滤，先拿到全量数据
+            scores = prob_A[cand_mask]  # [M_cand]
+            cand_idx_local = cand_mask.nonzero(as_tuple=False)  # [M_cand, 2]
 
-            # ★ 第一步：按阈值筛选，只保留 scores > 0.5 的候选边
-            keep = scores > 0.5
-            if keep.sum() == 0:
-                # 没有任何>0.5的非边，不在这张图中添加边
-                continue
+            # ================= [核心修改开始] =================
+            if self.training:
+                # 【训练模式】：
+                # 绝对不要用 scores > 0.5 截断！否则梯度传不回去。
+                # 直接保留所有候选，或者如果有 max_cand_per_graph 限制，
+                # 就选 Top-K (无论概率多低都选，为了让 Loss 把它推高)
 
-            scores = scores[keep]  # 只剩下 >0.5 的
-            cand_idx = cand_idx[keep]  # 对应的 (i,j)
+                if max_cand_per_graph is not None and scores.numel() > max_cand_per_graph:
+                    # 即使最大的概率是 0.1，也要选出来，否则永远学不到
+                    topv, topind = torch.topk(scores, max_cand_per_graph)
+                    scores = topv
+                    cand_idx_local = cand_idx_local[topind]
+                # else: 全部保留
 
-            # ★ 第二步：如果候选还很多，再按分数取 top-K（最多 max_cand_per_graph 条）
-            if max_cand_per_graph is not None and scores.numel() > max_cand_per_graph:
-                topv, topind = torch.topk(scores, max_cand_per_graph)
-                scores = topv
-                cand_idx = cand_idx[topind]
+            else:
+                # 【推理/验证模式】：
+                # 需要生成合法的稀疏图，所以必须要有 > 0.5 的硬约束
+                keep = scores > 0.5
+                if keep.sum() == 0:
+                    continue  # 推理时如果没有大于0.5的边，就不加边
+
+                scores = scores[keep]
+                cand_idx_local = cand_idx_local[keep]
+
+                # 满足 >0.5 后，如果还太多，再截断
+                if max_cand_per_graph is not None and scores.numel() > max_cand_per_graph:
+                    topv, topind = torch.topk(scores, max_cand_per_graph)
+                    scores = topv
+                    cand_idx_local = cand_idx_local[topind]
+            # ================= [核心修改结束] =================
 
             # 映射回全局 index
-            row_local = cand_idx[:, 0]
-            col_local = cand_idx[:, 1]
-            src_global = fs_idx_g[row_local]   # [m]
-            dst_global = fs_idx_g[col_local]   # [m]
+            row_local = cand_idx_local[:, 0]
+            col_local = cand_idx_local[:, 1]
+            src_global = fs_idx_g[row_local]
+            dst_global = fs_idx_g[col_local]
 
             cand_src_all.append(src_global)
             cand_dst_all.append(dst_global)
@@ -921,11 +928,11 @@ class MyExplainerV2(nn.Module):
         l1_del = (1 - p_keep).mean()
 
         # ---- 3. VGAE loss 权重 ----
-        w_cf = getattr(args, "w_cf", 5.0)
+        w_cf = getattr(args, "w_cf", 50.0)
         w_add_budget = getattr(args, "w_add_budget", 0.1)
         w_del_budget = getattr(args, "w_del_budget", 0.0)
         w_l1_add = getattr(args, "w_l1_add", 0.1)
-        w_l1_del = getattr(args, "w_l1_del", 0.5)
+        w_l1_del = getattr(args, "w_l1_del", 1.0)
 
         w_vgae_recon = getattr(args, "w_vgae_recon", 5.0)
         w_vgae_kl = getattr(args, "w_vgae_kl", 1)

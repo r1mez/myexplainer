@@ -96,7 +96,7 @@ class NCI1GCN(torch.nn.Module):
         return self.readout, pred
 
     def get_pred_explain(self, x, edge_index, edge_mask, batch):
-        edge_mask = (edge_mask * EPS).sigmoid()
+        # edge_mask = (edge_mask * EPS).sigmoid()
         for conv, batch_norm, relu in zip(self.convs, self.batch_norms, self.relus):
             x = conv(x, edge_index, edge_weight=edge_mask)
             x = relu(x)

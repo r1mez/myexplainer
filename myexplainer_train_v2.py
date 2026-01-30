@@ -1,10 +1,6 @@
-
 import argparse
-from datetime import datetime
-from xmlrpc.client import boolean
 import os
 import pickle
-import hashlib
 
 import torch
 import torch.optim as optim
@@ -12,12 +8,10 @@ from torch_geometric.loader import DataLoader
 from torch.utils.data import DataLoader as TorchDataLoader
 
 from models.myexplainerV2 import MyExplainerV2
-from utils import get_datasets, GraphPairData, custom_collate_fn, GraphTrainData, train_collate_fn
-from models.myexplainer import MyExplainer, MyExplainerBA2, MyCausalExplainer
-from utils.pair_data import GraphTrainDataBA2
-from utils.ps.mol_bpe import graph_bpe
-from utils.train_myexplainer import train_myexplainer_with_subgraph, train_myexplainer_with_causality, \
-    train_myexplainerV2
+from utils import get_datasets,train_collate_fn
+from utils.pair_data import MappedDataset
+from utils.subgraph_method import subgraph_mining
+from utils.train_myexplainer import train_myexplainerV2
 from gnns import *
 
 from utils.FSM.subgraph_mining.decoder import FSMiner
@@ -40,13 +34,14 @@ def parse_args():
     parser.add_argument('--dataset', type=str, default='mutag', help='Dataset name')
     parser.add_argument('--gnn_path', type=str, default='param/', help='GNN directory')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use (cpu or cuda)')
-    parser.add_argument('--train_mode',type=bool,default=False,help='Current mode')
+    parser.add_argument('--train_mode',type=bool,default=True,help='Current mode')
     parser.add_argument('--task', type=str, default='graph', help='Task type: graph classification or node classification')
+
 
     # 数据参数
     parser.add_argument('--top_k', type=int, default=1, help='Number of similar graphs for pairing')
     parser.add_argument('--threshold', type=float, default=0, help='Prediction confidence threshold')
-    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
 
     # 模型参数
     # ba2: 128,32    mutag:256,32
@@ -59,8 +54,10 @@ def parse_args():
 
     # 训练参数
     parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
+
+    parser.add_argument('--subgraph_method',type=str,default='genGraphEx',help='Subgraph method')
 
     return parser.parse_args()
 
@@ -106,59 +103,30 @@ def main():
     indices_0 = [i for i, pred in enumerate(pred_labels) if pred == 0]
     indices_1 = [i for i, pred in enumerate(pred_labels) if pred == 1]
     train_dataset_0, train_dataset_1 = train_dataset[indices_0], train_dataset[indices_1]
-
+    splited_train_dataset = {0: train_dataset_0, 1: train_dataset_1}
 
 
     # 加载子图模式
     # 如果fsm_results/args.dataset_patterns.pkl不存在，则运行FSMiner进行挖掘,否则直接加载
-    print("\n3. Loading or mining frequent subgraph patterns...")
-    patterns_0_path = f'fsm_results/{args.dataset}_0_patterns.pkl'
-    patterns_1_path = f'fsm_results/{args.dataset}_1_patterns.pkl'
-    if os.path.exists(patterns_0_path) and os.path.exists(patterns_1_path):
-        print(f"  Found existing patterns, loading...")
-        with open(patterns_0_path, 'rb') as f:
-            patterns_0 = pickle.load(f)
-        with open(patterns_1_path, 'rb') as f:
-            patterns_1 = pickle.load(f)
-        print(f"  Loaded {len(patterns_0 )} patterns for class 0 and {len(patterns_1)} patterns for class 1")
-    else:
-        print(f"  No existing patterns found, mining from training data...")
-        FSMiner(train_dataset_0, 0)
-        with open(patterns_0_path, 'rb') as f:
-            patterns_0 = pickle.load(f)
-        print(patterns_0[0].nodes(data=True))
-        FSMiner(train_dataset_1, 1)
-        with open(patterns_1_path, 'rb') as f:
-            patterns_1 = pickle.load(f)
-
-        print("  Finished mining frequent subgraph patterns.")
-
-
-
-    # def reverse_groups_new(lst, group_size=3):
-    #     """
-    #     返回新列表，按组倒序。
-    #     """
-    #     n = len(lst) // group_size
-    #     result = []
-    #     for i in range(n - 1, -1, -1):  # 从后往前遍历组索引
-    #         result.extend(lst[i * group_size:(i + 1) * group_size])
-    #     return result
-    # patterns_0 = reverse_groups_new(patterns_0, group_size=3)
-    # patterns_1 = reverse_groups_new(patterns_1, group_size=3)
-    patterns = {0: patterns_0, 1: patterns_1}
+    patterns = subgraph_mining(args,splited_train_dataset)
 
 
 
     print("\n4. Creating dataset with subgraph masks...")
 
-    train_dataset_with_masks = GraphTrainDataBA2(args, train_dataset, patterns, pred_labels, pred_probs)
-    val_dataset_with_masks = GraphTrainDataBA2(args, val_dataset, patterns,gnn=gnn)
-
+    train_dataset_with_masks = MappedDataset(args, train_dataset, patterns, pred_labels, pred_probs)
+    test_dataset_with_masks = MappedDataset(args, test_dataset, patterns,gnn=gnn)
+    val_dataset_with_masks = MappedDataset(args, val_dataset, patterns,gnn=gnn)
 
     print("\n5. Creating masked data loader...")
     train_loader_masked = TorchDataLoader(
         train_dataset_with_masks,
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=train_collate_fn
+    )
+    test_loader_masked = TorchDataLoader(
+        test_dataset_with_masks,
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=train_collate_fn
@@ -185,6 +153,14 @@ def main():
             lr=args.lr,
             weight_decay=args.weight_decay
         )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=0.8,
+            patience=15,
+            verbose=True,
+            min_lr=1e-6
+        )
         print(f"  Optimizer: Adam")
         print(f"  Learning rate: {args.lr}")
         print(f"  Weight decay: {args.weight_decay}")
@@ -200,6 +176,7 @@ def main():
             train_loader=train_loader_masked,
             eval_loader=val_loader_masked,
             optimizer=optimizer,
+            scheduler=scheduler,
             epochs=args.epochs
         )
         print("\n" + "=" * 80)

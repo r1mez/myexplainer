@@ -37,7 +37,7 @@ def parse_decoder(parser):
                         subgraph_sample_size=0,
                         sample_method="tree",
                         skip="learnable",
-                        min_pattern_size=5,
+                        min_pattern_size=6,
                         max_pattern_size=12,
                         min_neighborhood_size=10,
                         max_neighborhood_size=10,

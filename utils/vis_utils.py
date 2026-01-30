@@ -298,7 +298,7 @@ def visualize_explainer_graph(
             )
 
     # 6.4 标签 & colorbar
-    if graphs[g_idx].smiles is not None:
+    if getattr(graphs[g_idx], 'smiles', None) is not None:
         x_g_cpu = x_g.cpu().numpy()  # [n_g, x_dim]
 
         ATOM_TYPES = ["C", "O", "Cl", "H", "N", "F", "Br", "S", "P", "I", "Na", "K", "Li", "Ca"]

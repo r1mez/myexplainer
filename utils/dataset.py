@@ -4,6 +4,7 @@ from datasets import Mutagenicity
 from datasets import NCI1
 from datasets import bbbp
 from datasets import BA2Motif
+from datasets import Benzene
 
 def get_datasets(name, root="data/"):
     """
@@ -58,6 +59,11 @@ def get_datasets(name, root="data/"):
         train_dataset = BA2Motif(folder, mode="training")
         test_dataset = BA2Motif(folder, mode="testing")
         val_dataset = BA2Motif(folder, mode="evaluation")
+    elif name == "benzene":
+        folder = os.path.join(root, "benzene")
+        train_dataset = Benzene(folder, mode="training")
+        test_dataset = Benzene(folder, mode="testing")
+        val_dataset = Benzene(folder, mode="evaluation")
     else:
         raise ValueError
     return train_dataset, val_dataset, test_dataset
