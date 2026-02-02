@@ -304,7 +304,7 @@ class MyExplainerV2(nn.Module):
 
         # 总损失聚合
         total_loss = (
-                getattr(args, "w_cf", 50.0) * cf_loss +
+                getattr(args, "w_cf", 5.0) * cf_loss +
                 getattr(args, "w_l1_add", 0.1) * l1_add +
                 getattr(args, "w_l1_del", 1.0) * l1_del +
                 getattr(args, "w_vgae_recon", 5.0) * recon_loss +

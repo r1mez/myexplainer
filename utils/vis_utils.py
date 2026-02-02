@@ -82,90 +82,72 @@ def visualize_subgraph(data, edge_mask):
 
     return img
 
+
 def visualize_explainer_graph(
-    graphs,
-    y_desired,
-    outputs,
-    g_idx: int = 11,
-    tau_keep: float = 0.5,
-    tau_add: float = 0.5,
-    layout: str = "spring",
-    seed: int = 42,
+        graphs,
+        y_desired,
+        outputs,
+        g_idx: int = 0,
+        tau_keep: float = 0.5,
+        tau_add: float = 0.5,
+        layout: str = "spring",
+        seed: int = 42,
 ):
     """
-    可视化 CFExplainerVGAEAdd 对第 g_idx 张图的解释结果：
-
-      - 节点颜色: 由 fs_nodes_bool / fs_node_mask 决定（FS 节点更红）
-      - 原始边:
-          * 蓝色实线: p_keep >= tau_keep（保留的边）
-          * 蓝色虚线: p_keep <  tau_keep（倾向删除的边）
-      - 新增边:
-          * 红色虚线: 候选新增边 (cand_src, cand_dst)，且 p_add >= tau_add
-
-    Args:
-        graphs: PyG Batch，包含 x, edge_index, batch 等
-        y_desired: [B] 或 [B,1]，反事实目标标签，用于标题显示
-        outputs: CFExplainerVGAEAdd.forward(...) 的输出 dict
-        g_idx: 可视化 batch 中的第几张图
-        tau_keep: 判定“保留 / 删除”原始边的概率阈值
-        tau_add: 判定“画不画出来新增边”的概率阈值
-        layout: 'spring' / 'kamada_kawai' / 'random'
-        seed: spring 布局随机种子
+    可视化优化版：
+    1. 解决边重叠：若候选边已存在于原图，则跳过，不重复绘制。
+    2. 视觉分层：保留边(实线)、删除边(淡化点线)、新增边(红色虚线)。
     """
+    # 确保关闭之前的图表，防止内存泄漏或重叠
+    plt.close('all')
+
     device = graphs.x.device
+    x_all = graphs.x
+    edge_index = graphs.edge_index
+    batch = graphs.batch
 
-    x_all = graphs.x                      # [N_total, x_dim]
-    edge_index = graphs.edge_index        # [2, E_total]
-    batch = graphs.batch                  # [N_total]
+    # 获取输出
+    p_keep_all = outputs["p_keep"]
+    cand_src = outputs.get("cand_src", None)
+    cand_dst = outputs.get("cand_dst", None)
+    p_add_all = outputs.get("p_add", None)
 
-    # 来自 CFExplainerVGAEAdd.forward 的输出
-    p_keep_all = outputs["p_keep"]        # [E_total]
-    cand_src = outputs.get("cand_src", None)   # [M_add] or None
-    cand_dst = outputs.get("cand_dst", None)   # [M_add] or None
-    p_add_all = outputs.get("p_add", None)     # [M_add] or None
+    fs_nodes_bool = outputs.get("fs_nodes_bool", None)
+    fs_node_mask = outputs.get("fs_node_mask", None)
 
-    fs_nodes_bool = outputs.get("fs_nodes_bool", None)   # [N_total] bool
-    fs_node_mask = outputs.get("fs_node_mask", None)     # [N_total,1] or [N_total]
-
-    # ========= 1. 取出第 g_idx 张图的节点 =========
-    node_idx = (batch == g_idx).nonzero(as_tuple=False).view(-1)  # [n_g]
+    # ========= 1. 取出第 g_idx 张图 =========
+    node_idx = (batch == g_idx).nonzero(as_tuple=False).view(-1)
     if node_idx.numel() == 0:
-        print(f"[visualize_explainer_graph] batch 中没有索引为 {g_idx} 的图")
+        print(f"[visualize] batch 中没有索引为 {g_idx} 的图")
         return
 
     n_g = node_idx.size(0)
-    x_g = x_all[node_idx]  # [n_g, x_dim]
+    x_g = x_all[node_idx]
 
-    # ========= 2. 节点颜色：FS 节点更红 =========
-    if fs_nodes_bool is not None:
-        node_vals = fs_nodes_bool[node_idx].float().cpu().numpy()
-    elif fs_node_mask is not None:
-        node_vals = fs_node_mask[node_idx].view(-1).detach().cpu().numpy()
-    else:
-        node_vals = np.ones(n_g, dtype=np.float32)
-
-    # ========= 3. 构造这一图的原始边 + p_keep =========
-    row_all, col_all = edge_index
-    # 只保留属于 g_idx 这张图的边
-    edge_mask_g = (batch[row_all] == g_idx) & (batch[col_all] == g_idx)
-    edge_index_g_global = edge_index[:, edge_mask_g]      # [2, E_g]
-    p_keep_g = p_keep_all[edge_mask_g]                    # [E_g]
-
-    # 全局 -> 局部 节点编号映射
+    # 全局 -> 局部 映射
     global_to_local = {int(n.item()): i for i, n in enumerate(node_idx)}
 
-    # 收集无向边 (u_local, v_local) 以及对应的 p_keep（注意去重）
-    edge_score_dict = {}  # key: (u,v), val: [scores]
+    # ========= 2. 处理原始边 (Existing Edges) =========
+    row_all, col_all = edge_index
+    edge_mask_g = (batch[row_all] == g_idx) & (batch[col_all] == g_idx)
+    edge_index_g_global = edge_index[:, edge_mask_g]
+    p_keep_g = p_keep_all[edge_mask_g]
+
+    # 用于快速查找 "这条边是否已存在"，防止新增边重叠
+    existing_edges_set = set()
+
+    edge_score_dict = {}
     for (gi, gj), pk in zip(edge_index_g_global.t(), p_keep_g):
-        gi = int(gi.item())
-        gj = int(gj.item())
+        gi, gj = int(gi.item()), int(gj.item())
         if gi not in global_to_local or gj not in global_to_local or gi == gj:
             continue
-        u = global_to_local[gi]
-        v = global_to_local[gj]
-        if u > v:
-            u, v = v, u
+
+        u, v = global_to_local[gi], global_to_local[gj]
+        if u > v: u, v = v, u  # 无向图标准化
+
         key = (u, v)
+        existing_edges_set.add(key)  # 记录已存在边
+
         if key not in edge_score_dict:
             edge_score_dict[key] = []
         edge_score_dict[key].append(float(pk.item()))
@@ -173,32 +155,38 @@ def visualize_explainer_graph(
     orig_edges = list(edge_score_dict.keys())
     orig_scores = [np.mean(edge_score_dict[e]) for e in orig_edges] if orig_edges else []
 
-    # ========= 4. 构造这一图的候选新增边 + p_add =========
+    # ========= 3. 处理新增边 (New Edges) - 关键修改 =========
     new_edges = []
     new_scores = []
 
     if cand_src is not None and p_add_all is not None and p_add_all.numel() > 0:
-        cand_src = cand_src.to(device)
-        cand_dst = cand_dst.to(device)
-        p_add_all = p_add_all.to(device)
+        # 移到 CPU 处理方便
+        cand_src_cpu = cand_src.detach().cpu()
+        cand_dst_cpu = cand_dst.detach().cpu()
+        p_add_cpu = p_add_all.detach().cpu()
+        batch_cpu = batch.cpu()
 
-        # 只保留当前图 g_idx 内部的候选边
-        mask_add_g = (batch[cand_src] == g_idx) & (batch[cand_dst] == g_idx)
-        cand_src_g = cand_src[mask_add_g]
-        cand_dst_g = cand_dst[mask_add_g]
-        p_add_g = p_add_all[mask_add_g]
+        # 筛选属于当前图 g_idx 的候选边
+        mask_add_g = (batch_cpu[cand_src_cpu] == g_idx) & (batch_cpu[cand_dst_cpu] == g_idx)
+        cand_src_g = cand_src_cpu[mask_add_g]
+        cand_dst_g = cand_dst_cpu[mask_add_g]
+        p_add_g = p_add_cpu[mask_add_g]
 
         add_score_dict = {}
         for gi, gj, pa in zip(cand_src_g, cand_dst_g, p_add_g):
-            gi = int(gi.item())
-            gj = int(gj.item())
+            gi, gj = int(gi.item()), int(gj.item())
             if gi not in global_to_local or gj not in global_to_local or gi == gj:
                 continue
-            u = global_to_local[gi]
-            v = global_to_local[gj]
-            if u > v:
-                u, v = v, u
+
+            u, v = global_to_local[gi], global_to_local[gj]
+            if u > v: u, v = v, u
             key = (u, v)
+
+            # 【核心去重逻辑】：如果原图里已经有了这条边，不要把它算作新增边！
+            # 即使 VGAE 预测了它，它也属于 "p_keep" 的范畴，而不是 "p_add"
+            if key in existing_edges_set:
+                continue
+
             if key not in add_score_dict:
                 add_score_dict[key] = []
             add_score_dict[key].append(float(pa.item()))
@@ -206,132 +194,151 @@ def visualize_explainer_graph(
         new_edges = list(add_score_dict.keys())
         new_scores = [np.mean(add_score_dict[e]) for e in new_edges] if new_edges else []
 
-    # ========= 5. 构造单图 Data & NetworkX 图 =========
+    # ========= 4. 构建 NetworkX 图 =========
+    # 我们只用原始边构建 G，这样 layout 是基于原图骨架的
     if len(orig_edges) > 0:
-        edge_index_g_local = torch.tensor(orig_edges, dtype=torch.long).t().contiguous()
+        edge_index_local = torch.tensor(orig_edges, dtype=torch.long).t()
     else:
-        edge_index_g_local = torch.empty((2, 0), dtype=torch.long)
+        edge_index_local = torch.empty((2, 0), dtype=torch.long)
 
-    data_g = Data(
-        x=x_g.cpu(),
-        edge_index=edge_index_g_local.cpu()
-    )
+    data_g = Data(x=x_g.cpu(), edge_index=edge_index_local)
     G = to_networkx(data_g, to_undirected=True)
 
-    # 节点布局
+    # 如果有新增节点（孤立点在原图中无边），确保它们也在 G 里
+    if G.number_of_nodes() < n_g:
+        G.add_nodes_from(range(n_g))
+
+    # 布局
     if layout == "spring":
         pos = nx.spring_layout(G, seed=seed)
     elif layout == "kamada_kawai":
         pos = nx.kamada_kawai_layout(G)
-    elif layout == "random":
-        pos = nx.random_layout(G)
     else:
         pos = nx.spring_layout(G, seed=seed)
 
-    # ========= 6. 开始画图 =========
-    plt.figure(figsize=(8, 6))
+    # ========= 5. 绘图 =========
+    plt.figure(figsize=(10, 8))
+    ax = plt.gca()
 
-    # 6.1 画节点：FS 节点更红
+    # --- 5.1 画节点 ---
+    # 颜色值
+    if fs_nodes_bool is not None:
+        node_vals = fs_nodes_bool[node_idx].float().cpu().numpy()
+    elif fs_node_mask is not None:
+        node_vals = fs_node_mask[node_idx].view(-1).detach().cpu().numpy()
+    else:
+        node_vals = np.ones(n_g)
+
     nodes = nx.draw_networkx_nodes(
         G, pos,
         node_color=node_vals,
         cmap=plt.cm.Reds,
-        edgecolors="black",
-        node_size=100,
-        alpha=0.8
+        edgecolors="#333333",  # 深灰色边框
+        linewidths=1.0,
+        node_size=300,
+        alpha=0.9
     )
 
-    # 6.2 画原始边：根据 p_keep 分成保留 / 删除（颜色统一）
+    # --- 5.2 画原始边 (分类：保留 vs 删除) ---
     if len(orig_edges) > 0:
         orig_scores_np = np.array(orig_scores)
 
-        solid_edges = []
-        dashed_edges = []
+        edges_keep = []  # 保留
+        edges_drop = []  # 删除
 
-        for edge, score in zip(orig_edges, orig_scores_np):
+        for i, score in enumerate(orig_scores_np):
             if score >= tau_keep:
-                solid_edges.append(edge)  # 保留：实线
+                edges_keep.append(orig_edges[i])
             else:
-                dashed_edges.append(edge)  # 删除：虚线
+                edges_drop.append(orig_edges[i])
 
-        # 保留的边：统一蓝色实线
-        if solid_edges:
+        # 1. 保留的边：深蓝色实线，显眼
+        if edges_keep:
             nx.draw_networkx_edges(
                 G, pos,
-                edgelist=solid_edges,
-                edge_color="blue",
-                width=2.0,
+                edgelist=edges_keep,
+                edge_color="#1f77b4",  # 标准蓝
+                width=2.5,
+                alpha=0.8
             )
 
-        # 倾向删除的边：统一蓝色虚线
-        if dashed_edges:
+        # 2. 拟删除的边：灰色/淡蓝色点线，非常淡，表示"即将消失"
+        if edges_drop:
             nx.draw_networkx_edges(
                 G, pos,
-                edgelist=dashed_edges,
-                edge_color="blue",
-                width=2.0,
-                style="dashed",
+                edgelist=edges_drop,
+                edge_color="grey",
+                width=1.5,
+                style="dotted",
+                alpha=0.4  # 透明度高一点，不要喧宾夺主
             )
 
-    # 6.3 画候选新增边：红色虚线，p_add >= tau_add
+    # --- 5.3 画新增边 ---
+    # 只有当概率 > tau_add 才画出来
     if len(new_edges) > 0:
         new_scores_np = np.array(new_scores)
-        # 只画分数高于 tau_add 的
-        filtered_edges = []
-        filtered_scores = []
-        for e, s in zip(new_edges, new_scores_np):
-            if s >= tau_add:
-                filtered_edges.append(e)
-                filtered_scores.append(s)
+        edges_add = []
+        scores_add = []
 
-        if filtered_edges:
-            filtered_scores_np = np.array(filtered_scores)
-            norm_add = plt.Normalize(vmin=filtered_scores_np.min(), vmax=filtered_scores_np.max())
-            new_colors_rgba = plt.cm.Reds(norm_add(filtered_scores_np))
+        for i, score in enumerate(new_scores_np):
+            if score >= tau_add:
+                edges_add.append(new_edges[i])
+                scores_add.append(score)
 
+        if edges_add:
+            # 使用颜色映射表示置信度，或者统一用红色
+            # 这里统一用红色虚线，表示"反事实添加"
             nx.draw_networkx_edges(
                 G, pos,
-                edgelist=filtered_edges,
-                edge_color=new_colors_rgba,
-                width=2.0,
+                edgelist=edges_add,
+                edge_color="#d62728",  # 标准红
+                width=2.5,
                 style="dashed",
+                alpha=0.9
             )
 
-    # 6.4 标签 & colorbar
-    if getattr(graphs[g_idx], 'smiles', None) is not None:
-        x_g_cpu = x_g.cpu().numpy()  # [n_g, x_dim]
+    # --- 5.4 标签 ---
+    # 尝试画原子类型
+    smiles = getattr(graphs[g_idx], 'smiles', None)
 
-        ATOM_TYPES = ["C", "O", "Cl", "H", "N", "F", "Br", "S", "P", "I", "Na", "K", "Li", "Ca"]
+    # 简单推断原子类型逻辑 (假设前几维是 one-hot)
+    ATOM_TYPES = ['C','O','Cl','H','N','F','Br','S','P','I','Na','K','Li','Ca']
+    labels = {}
+    x_cpu = x_g.cpu().numpy()
 
-        # 如果前 len(ATOM_TYPES) 维是原子类型 one-hot：
-        type_feat = x_g_cpu[:, :len(ATOM_TYPES)]  # [n_g, num_atom_types]
+    # 如果特征维度很小，可能是 one-hot
+    if x_cpu.shape[1] >= len(ATOM_TYPES):
+        # 简单的启发式检查：看是否主要是 0/1
+        if (x_cpu.max() <= 1.0) and (x_cpu.min() >= 0.0):
+            for i in range(n_g):
+                feat = x_cpu[i, :len(ATOM_TYPES)]
+                idx = np.argmax(feat)
+                # 只有当最大值接近1时才认为是该原子
+                if feat[idx] > 0.5:
+                    labels[i] = ATOM_TYPES[idx] if idx < len(ATOM_TYPES) else "?"
+                else:
+                    labels[i] = str(i)
 
-        # 对每个节点的 one-hot 取 argmax 得到类型下标
-        atom_type_idx = type_feat.argmax(axis=1)  # [n_g]
+    if not labels:
+        labels = {i: str(i) for i in range(n_g)}
 
-        # 构造 NetworkX 需要的 labels 字典：{节点局部id: 文本标签}
+    nx.draw_networkx_labels(G, pos, labels=labels, font_size=10, font_color="black", font_weight="bold")
 
-        labels = {i: ATOM_TYPES[int(idx)] for i, idx in enumerate(atom_type_idx)}
+    # --- 5.5 图例与标题 ---
+    plt.title(
+        f"Graph #{g_idx} Explanation\nTarget: {y_desired[g_idx].item() if y_desired.ndim > 0 else y_desired.item()}",
+        fontsize=12)
 
-        # 用 labels 画出来
-        nx.draw_networkx_labels(G, pos, labels=labels, font_size=8)
-    else:
-        nx.draw_networkx_labels(G, pos, font_size=8)
-
-    # 节点 FS 程度的 colorbar
-    cb_nodes = plt.colorbar(nodes, shrink=0.6, pad=0.02)
-    cb_nodes.set_label("FS node score (bool/mask)", fontsize=10)
-
-    # 原始边 p_keep 的 colorbar
-    if len(orig_edges) > 0:
-        sm_keep = plt.cm.ScalarMappable(cmap=plt.cm.Blues)
-        sm_keep.set_array([])
-        cb_keep = plt.colorbar(sm_keep, shrink=0.6, pad=0.02)
-        cb_keep.set_label("p_keep (edge retention prob.)", fontsize=10)
-
-    # 标题：简单用 y_desired 展示（如果你有 y_hat，可以自己改）
-    y_des_val = int(y_desired[g_idx].item()) if y_desired.dim() > 0 else int(y_desired.item())
-    plt.title(f"Graph #{g_idx} CF explanation (y_desired={y_des_val})\n{graphs[g_idx].get('smiles',None)}\ny_desired={y_desired[g_idx].item()}")
+    # 手动添加图例，比 colorbar 更直观
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], color='#1f77b4', lw=2.5, label=f'Keep (p>{tau_keep})'),
+        Line2D([0], [0], color='grey', lw=1.5, linestyle=':', alpha=0.5, label=f'Drop (p<{tau_keep})'),
+        Line2D([0], [0], color='#d62728', lw=2.5, linestyle='--', label=f'Add (p>{tau_add})'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#ffaaaa', markersize=10, label='FS Node'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#ffeeee', markersize=10, label='Normal Node'),
+    ]
+    plt.legend(handles=legend_elements, loc='upper right', fontsize=8)
 
     plt.axis("off")
     plt.tight_layout()

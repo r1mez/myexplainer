@@ -927,8 +927,80 @@ def count_valid(target_lables, cf_graphs, gnn):
 
     return flipped_lables
 
+# def compute_proximity(args, cf_graphs, ori_graphs):
+#     # 现在只用邻接矩阵距离，rho=1即可
+#     rho = 1.0
+#
+#     ori_graphs = ori_graphs.to_data_list()
+#     cf_graphs = cf_graphs.to_data_list()
+#     batch_size = len(ori_graphs)
+#     distances = torch.zeros(batch_size, device=args.device)
+#
+#     # 安全版本的 to_dense_adj，支持空 edge_index
+#     def safe_to_dense_adj(data):
+#         edge_index = data.edge_index
+#
+#         # 确定节点数：
+#         # 1) 优先用 num_nodes
+#         # 2) 再用 x.size(0)
+#         # 3) 最后从 edge_index 推
+#         if getattr(data, 'num_nodes', None) is not None and data.num_nodes is not None:
+#             num_nodes = data.num_nodes
+#         elif getattr(data, 'x', None) is not None and data.x is not None:
+#             num_nodes = data.x.size(0)
+#         else:
+#             if edge_index.numel() == 0:
+#                 # 没任何信息，只能返回 0x0
+#                 return torch.zeros(0, 0, device=args.device)
+#             num_nodes = int(edge_index.max().item()) + 1
+#
+#         # 确定 device
+#         if edge_index.numel() > 0:
+#             device = edge_index.device
+#         elif getattr(data, 'x', None) is not None and data.x is not None:
+#             device = data.x.device
+#         else:
+#             device = args.device
+#
+#         # 如果没有边：返回全 0 邻接矩阵 [num_nodes, num_nodes]
+#         if edge_index.numel() == 0:
+#             return torch.zeros(num_nodes, num_nodes, device=device)
+#
+#         # 正常情况：确保形状是 [num_nodes, num_nodes]
+#         dense = to_dense_adj(edge_index, max_num_nodes=num_nodes).squeeze(0)
+#         return dense
+#
+#     for i in range(batch_size):
+#         orig_data = ori_graphs[i]
+#         cf_data = cf_graphs[i]
+#
+#         # 邻接矩阵（已经处理空图）
+#         orig_adj = safe_to_dense_adj(orig_data)  # [n1, n1]
+#         cf_adj = safe_to_dense_adj(cf_data)      # [n2, n2]
+#
+#         # 若节点数不同，做零填充对齐
+#         n_orig, n_cf = orig_adj.size(0), cf_adj.size(0)
+#
+#         # 邻接矩阵差异（Frobenius 范数）
+#         d_adj = torch.norm(orig_adj - cf_adj, p='fro')
+#
+#         # 用边数归一化
+#         m_orig = orig_data.num_edges // 2 if orig_data.is_undirected() else orig_data.num_edges
+#         m_cf = cf_data.num_edges // 2 if cf_data.is_undirected() else cf_data.num_edges
+#         max_m = max(m_orig, m_cf)
+#
+#         norm_d_adj = d_adj / max_m if max_m > 0 else 0.0
+#
+#         # 现在距离只由邻接矩阵决定
+#         distances[i] = rho * norm_d_adj
+#
+#     return distances.sum().item()
+
 def compute_proximity(args, cf_graphs, ori_graphs):
-    # 现在只用邻接矩阵距离，rho=1即可
+    """
+    计算原始图与反事实图的邻接矩阵距离 (L1 Norm / Graph Edit Distance Approximation)
+    修复了维度对齐问题，并解决了 Frobenius 范数导致的量纲不匹配问题。
+    """
     rho = 1.0
 
     ori_graphs = ori_graphs.to_data_list()
@@ -936,66 +1008,54 @@ def compute_proximity(args, cf_graphs, ori_graphs):
     batch_size = len(ori_graphs)
     distances = torch.zeros(batch_size, device=args.device)
 
-    # 安全版本的 to_dense_adj，支持空 edge_index
-    def safe_to_dense_adj(data):
-        edge_index = data.edge_index
-
-        # 确定节点数：
-        # 1) 优先用 num_nodes
-        # 2) 再用 x.size(0)
-        # 3) 最后从 edge_index 推
-        if getattr(data, 'num_nodes', None) is not None and data.num_nodes is not None:
-            num_nodes = data.num_nodes
-        elif getattr(data, 'x', None) is not None and data.x is not None:
-            num_nodes = data.x.size(0)
-        else:
-            if edge_index.numel() == 0:
-                # 没任何信息，只能返回 0x0
-                return torch.zeros(0, 0, device=args.device)
-            num_nodes = int(edge_index.max().item()) + 1
-
-        # 确定 device
-        if edge_index.numel() > 0:
-            device = edge_index.device
-        elif getattr(data, 'x', None) is not None and data.x is not None:
-            device = data.x.device
-        else:
-            device = args.device
-
-        # 如果没有边：返回全 0 邻接矩阵 [num_nodes, num_nodes]
-        if edge_index.numel() == 0:
-            return torch.zeros(num_nodes, num_nodes, device=device)
-
-        # 正常情况：确保形状是 [num_nodes, num_nodes]
-        dense = to_dense_adj(edge_index, max_num_nodes=num_nodes).squeeze(0)
-        return dense
-
     for i in range(batch_size):
         orig_data = ori_graphs[i]
         cf_data = cf_graphs[i]
 
-        # 邻接矩阵（已经处理空图）
-        orig_adj = safe_to_dense_adj(orig_data)  # [n1, n1]
-        cf_adj = safe_to_dense_adj(cf_data)      # [n2, n2]
+        # ---------------------------------------------------------
+        # 步骤 1: 确定统一的节点数 N
+        # 即使 cf_data 删除了边导致孤立点，矩阵维度仍需保持与原图一致
+        # ---------------------------------------------------------
+        if getattr(orig_data, 'num_nodes', None) is not None:
+            N = orig_data.num_nodes
+        elif getattr(orig_data, 'x', None) is not None:
+            N = orig_data.x.size(0)
+        else:
+            # 兜底逻辑：取最大的索引值
+            max_idx = 0
+            if orig_data.edge_index.numel() > 0:
+                max_idx = int(orig_data.edge_index.max())
+            if cf_data.edge_index.numel() > 0:
+                max_idx = max(max_idx, int(cf_data.edge_index.max()))
+            N = max_idx + 1
 
-        # 若节点数不同，做零填充对齐
-        n_orig, n_cf = orig_adj.size(0), cf_adj.size(0)
+        # ---------------------------------------------------------
+        # 步骤 2: 转换为稠密矩阵 (强制指定 max_num_nodes=N)
+        # 这确保了 orig_adj 和 cf_adj 形状严格一致 [N, N]
+        # ---------------------------------------------------------
+        orig_adj = to_dense_adj(orig_data.edge_index, max_num_nodes=N).squeeze(0)
+        cf_adj = to_dense_adj(cf_data.edge_index, max_num_nodes=N).squeeze(0)
 
-        # 邻接矩阵差异（Frobenius 范数）
-        d_adj = torch.norm(orig_adj - cf_adj, p='fro')
+        # ---------------------------------------------------------
+        # 步骤 3: 计算差异 (使用 L1 范数)
+        # p=1 代表绝对值之和。对于无向图，删 1 条边，这里的值是 2。
+        # ---------------------------------------------------------
+        d_adj_entries = torch.norm(orig_adj - cf_adj, p=1)
 
-        # 用边数归一化
+        # ---------------------------------------------------------
+        # 步骤 4: 归一化
+        # 分子是矩阵条目的变化量，分母也应是矩阵条目的最大容量 (2 * max_edges)
+        # ---------------------------------------------------------
         m_orig = orig_data.num_edges // 2 if orig_data.is_undirected() else orig_data.num_edges
         m_cf = cf_data.num_edges // 2 if cf_data.is_undirected() else cf_data.num_edges
         max_m = max(m_orig, m_cf)
 
-        norm_d_adj = d_adj / max_m if max_m > 0 else 0.0
+        # 乘以 2.0 是为了匹配无向图邻接矩阵的对称性 (每条边占 2 个坑位)
+        normalization = 2.0 * max_m if max_m > 0 else 1.0
 
-        # 现在距离只由邻接矩阵决定
-        distances[i] = rho * norm_d_adj
+        distances[i] = rho * (d_adj_entries / normalization)
 
     return distances.sum().item()
-
 
 def compute_fidelity_prob(args, ori_graphs, cf_graphs, ori_prob, gnn):
     """
