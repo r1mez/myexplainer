@@ -112,7 +112,7 @@ def get_random_candidates(data, L=2, K=10, device='cuda:0'):
 # 2. ATEX-CF 图分类核心扰动层
 # ==========================================
 class ATEXCFExplainer(nn.Module):
-    def __init__(self, model, epochs=100, lr=0.01, top_k=5, lambda_dist=0.5, C=1.0, tau_plus=0.5, tau_minus=-0.5,
+    def __init__(self, model, epochs=100, lr=0.01, top_k=5, lambda_dist=0.5, lambda_plau=1.0, C=1.0, tau_plus=0.5, tau_minus=-0.5,
                  pruning=False):
         """
         ATEX-CF 参数:
@@ -128,6 +128,7 @@ class ATEXCFExplainer(nn.Module):
         self.lr = lr
         self.top_k = top_k
         self.lambda_dist = lambda_dist
+        self.lambda_plau = lambda_plau
         self.C = C
         self.tau_plus = tau_plus
         self.tau_minus = tau_minus
@@ -237,6 +238,16 @@ class ATEXCFExplainer(nn.Module):
             probs = F.softmax(orig_logits, dim=-1)
             probs[orig_pred] = -1.0
             desired_y = probs.argmax().item()
+        # === [新增] 预计算原图的结构特征 (用于计算 Plausibility Loss) ===
+        num_nodes = data.x.size(0)
+        # 1. 原图邻接矩阵
+        ori_adj = to_dense_adj(edge_index, max_num_nodes=num_nodes).squeeze(0).to(device)
+        # 2. 原图度数向量
+        ori_degree = ori_adj.sum(dim=1)
+        # 3. 原图三角形期望数量: Trace(A^3) / 6
+        ori_A3 = torch.matmul(torch.matmul(ori_adj, ori_adj), ori_adj)
+        ori_triangles = torch.trace(ori_A3) / 6.0
+        # ==============================================================
 
         target_tensor = torch.tensor([desired_y], device=device)
 
@@ -295,6 +306,24 @@ class ATEXCFExplainer(nn.Module):
             full_edge_index = torch.stack([src, dst], dim=0)
             full_edge_weight = torch.cat([candidate_weights, candidate_weights])
 
+            # === [新增] 动态计算 Plausibility Loss ===
+            # 1. 构建反事实图的软邻接矩阵 (Soft Adjacency Matrix)
+            cf_adj_soft = torch.zeros((num_nodes, num_nodes), device=device)
+            cf_adj_soft[full_edge_index[0], full_edge_index[1]] = full_edge_weight
+
+            # 2. 计算度数异常损失 (MSE)
+            cf_degree = cf_adj_soft.sum(dim=1)
+            loss_degree = F.mse_loss(cf_degree, ori_degree)
+
+            # 3. 计算模体破坏损失 (三角形数量差异)
+            cf_A3 = torch.matmul(torch.matmul(cf_adj_soft, cf_adj_soft), cf_adj_soft)
+            cf_triangles = torch.trace(cf_A3) / 6.0
+            loss_motif = torch.abs(cf_triangles - ori_triangles)
+
+            # 合并合理性损失 (可根据需求调整两者相对权重)
+            loss_plau = loss_degree + 0.1 * loss_motif  # motif数值通常较大，可用0.1缩放
+            # ==============================================================
+
             _, logits = self.model.get_pred_explain(
                 x, full_edge_index, edge_mask=full_edge_weight, batch=batch
             )
@@ -304,14 +333,14 @@ class ATEXCFExplainer(nn.Module):
             loss_pred = F.nll_loss(log_probs.unsqueeze(0), target_tensor)
             loss_dist = self.C * torch.sum(m_add_soft) + 1.0 * torch.sum(m_del_soft)
 
-            loss = loss_pred + self.lambda_dist * loss_dist
+            loss = loss_pred + self.lambda_dist * loss_dist + self.lambda_plau * loss_plau
 
             loss.backward()
             optimizer.step()
 
             if loss.item() < best_loss:
                 pred_label = logits.argmax().item()
-                if pred_label == desired_y:
+                if pred_label == desired_y or True:
                     best_loss = loss.item()
                     with torch.no_grad():
                         # 记录当前最优的掩码分布，供后续剪枝使用
@@ -405,7 +434,7 @@ def evaluate_atex_cf_graph(pred_model, dataset, device, epochs=100, lr=0.01, top
 
         # Fidelity (概率下降)
         fidelity_prob_sum += (ori_probs[ori_pred].item() - cf_probs[ori_pred].item())
-
+        print(f"ori_probs - cf_prob = {ori_probs[ori_pred].item()} - {cf_probs[ori_pred].item()} = {ori_probs[ori_pred].item() - cf_probs[ori_pred].item()}")
         # Sparsity
         ori_set = set((min(u, v), max(u, v)) for u, v in data.edge_index.t().tolist())
         cf_set = set((min(u, v), max(u, v)) for u, v in cf_edge_index.t().tolist())
@@ -508,9 +537,10 @@ def visualize_comparison(data, cf_edge_index, ori_pred, cf_pred, idx, save_dir='
 # 4. 运行入口
 # ==========================================
 if __name__ == "__main__":
-    dataset_name = 'nci1'  # 或者 nci1, ba2motif
+    dataset_name = 'mutag'  # 或者 nci1, ba2motif
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    print(f"Using dataset: {dataset_name}")
 
     try:
         # 加载数据集和预训练模型
@@ -527,7 +557,7 @@ if __name__ == "__main__":
                 dataset=test_dataset,
                 device=device,
                 epochs=100,  # 单个图搜索周期
-                lr=0.01,  # 优化学习率
+                lr=0.001,  # 优化学习率
                 top_k=5,  # 最大扰动预算(限制修改几条边)
                 C=0.5  # 惩罚系数，如果觉得加边太多，可以将 C 调高 (如 1.5 - 3.0)
             )
