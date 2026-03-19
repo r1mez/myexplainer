@@ -1,24 +1,22 @@
 import argparse
-import os
-import pickle
+import random
 
+import numpy as np
 import torch
 import torch.optim as optim
-from torch_geometric.loader import DataLoader
 from torch.utils.data import DataLoader as TorchDataLoader
+from torch_geometric.loader import DataLoader
 
+from evaluationV2 import evaluate
 from models.myexplainerV2 import MyExplainerV2
-from utils import get_datasets,train_collate_fn
+from utils import get_datasets, train_collate_fn
 from utils.pair_data import MappedDataset
 from utils.subgraph_method import subgraph_mining
 from utils.train_myexplainer import train_myexplainerV2
+
 from gnns import *
 
-from utils.FSM.subgraph_mining.decoder import FSMiner
-from evaluationV2 import evaluate
 
-import random
-import numpy as np
 def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -30,7 +28,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train MyExplainer model')
 
     # 基础设置
-    parser.add_argument('--cuda', type=int, default=1, help='GPU device')
+    parser.add_argument('--cuda', type=int, default=2, help='GPU device')
     parser.add_argument('--dataset', type=str, default='mutag', help='Dataset name')
     parser.add_argument('--gnn_path', type=str, default='param/', help='GNN directory')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use (cpu or cuda)')
@@ -53,7 +51,7 @@ def parse_args():
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
 
     # 训练参数
-    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=1, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
 
