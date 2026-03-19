@@ -1,5 +1,13 @@
 /param
-
+.idea/
 # 防止误提交 git 内部文件的拷贝/备份目录
 .Copy of git/
 .Copy of git/**
+
+# Python / coverage 生成物（不应提交）
+.coverage
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# pt文件
