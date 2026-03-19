@@ -11,3 +11,9 @@ __pycache__/
 *.py[cod]
 
 # pt文件
+*.pt
+
+
+data/
+*.txt
+*.csv
