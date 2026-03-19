@@ -8,7 +8,6 @@ from scipy.spatial.distance import cdist
 from torch_geometric.data import Data, Batch
 from torch_geometric.utils import from_networkx
 from typing import Set, Tuple, List, Union
-from data.mutag.smiles import data_to_smiles
 import re
 from time import time
 

@@ -12,8 +12,6 @@ from torch_geometric.data import Batch
 from torch_geometric.utils import to_networkx, from_networkx
 from torch_geometric.utils import subgraph as pyg_subgraph
 
-from data.mutag.smiles import data_to_smiles
-from utils import generate_subgraph_mask
 from utils.graph_utils import smarts_to_data
 from utils.subgraph_utils import generate_node_mappings, to_nx
 

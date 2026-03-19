@@ -7,8 +7,6 @@ import sklearn.preprocessing as preprocessing
 import torch
 from torch_geometric.data import Data, InMemoryDataset, download_url, extract_zip
 
-from .smiles_util import mutag2smiles
-
 
 class Mutagenicity(InMemoryDataset):
     url = "https://www.chrsmrrs.com/graphkerneldatasets/Mutagenicity.zip"
@@ -100,7 +98,6 @@ class Mutagenicity(InMemoryDataset):
                 name="mutag_%d" % i,
                 idx=i,
             )
-            data.smiles = mutag2smiles(data)
 
             # 去重
             if data.smiles in seen_smiles:

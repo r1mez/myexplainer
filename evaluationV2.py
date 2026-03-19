@@ -813,7 +813,6 @@ from torch_geometric.utils import to_dense_adj, to_dense_batch
 from torch_geometric.data import Batch, Data
 from tqdm import tqdm
 
-from utils import concat_graphs
 from utils.batch_utils import core_data_from_batch, output_to_batch
 from utils.graph_utils import extract_explanatory_subgraph, exclude_explanatory_subgraph
 import torch.nn.functional as F

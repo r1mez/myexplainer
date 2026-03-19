@@ -23,37 +23,12 @@ def get_datasets(name, root="data/"):
         train_dataset = NCI1(folder, mode="training")
         test_dataset = NCI1(folder, mode="testing")
         val_dataset = NCI1(folder, mode="evaluation")
-    elif name == "ba3":
-        folder = os.path.join(root, "BA3")
-        train_dataset = BA3Motif(folder, mode="training")
-        test_dataset = BA3Motif(folder, mode="testing")
-        val_dataset = BA3Motif(folder, mode="evaluation")
-    elif name == "BA_shapes":
-        folder = os.path.join(root)
-        test_dataset = SynGraphDataset(folder, mode="testing", name="BA_shapes")
-        val_dataset = SynGraphDataset(folder, mode="evaluating", name="BA_shapes")
-        train_dataset = SynGraphDataset(folder, mode="training", name="BA_shapes")
-    elif name == "Tree_Cycle":
-        folder = os.path.join(root)
-        test_dataset = SynGraphDataset(folder, mode="testing", name="Tree_Cycle")
-        val_dataset = SynGraphDataset(folder, mode="evaluating", name="Tree_Cycle")
-        train_dataset = SynGraphDataset(folder, mode="training", name="Tree_Cycle")
-    elif name == "Tree_Grids":
-        folder = os.path.join(root)
-        test_dataset = SynGraphDataset(folder, mode="testing", name="Tree_Grids")
-        val_dataset = SynGraphDataset(folder, mode="evaluating", name="Tree_Grids")
-        train_dataset = SynGraphDataset(folder, mode="training", name="Tree_Grids")
     elif name == "bbbp":
         folder = os.path.join(root, "bbbp")
         dataset = bbbp(folder)
         test_dataset = dataset[:200]
         val_dataset = dataset[200:400]
         train_dataset = dataset[400:]
-    elif name == "cornell":
-        folder = os.path.join(root)
-        test_dataset = WebDataset(folder, mode="testing", name=name)
-        val_dataset = WebDataset(folder, mode="evaluating", name=name)
-        train_dataset = WebDataset(folder, mode="training", name=name)
     elif name == "ba2motif":
         folder = os.path.join(root, "ba2motif")
         train_dataset = BA2Motif(folder, mode="training")

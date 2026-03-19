@@ -7,8 +7,6 @@ import sklearn.preprocessing as preprocessing
 import torch
 from torch_geometric.data import Data, InMemoryDataset, download_url, extract_zip
 
-from .smiles_util import nci12smiles
-
 class NCI1(InMemoryDataset):
     url = (
         "https://www.chrsmrrs.com/graphkerneldatasets/NCI1.zip"
@@ -97,7 +95,6 @@ class NCI1(InMemoryDataset):
                 edge_index=edge_index[:, begin:end] - int(min(perm)),
                 idx=i,
             )
-            # data.smiles = nci12smiles(data)
 
             if self.pre_filter is not None and not self.pre_filter(data):
                 continue
