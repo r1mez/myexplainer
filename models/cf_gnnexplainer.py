@@ -10,6 +10,11 @@ import torch.nn as nn
 from gnns import *
 from torch_geometric.data import InMemoryDataset
 from utils import get_datasets
+from utils.baseline_eval_metrics import (
+    compute_proximity_from_edge_index,
+    compute_fidelity_prob_from_probs,
+    compute_sparsity_from_edge_index,
+)
 
 def vector_to_symm_matrix(
 	vector: torch.Tensor, n_rows: int, n_rows_pad: int = 0, offset:int = -1
@@ -457,44 +462,25 @@ def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 		# 修改：无论是否 Valid，都计算以下指标
 		# ==========================================================
 
-		# 1. Proximity Calculation
-		ori_adj_np = ori_adj.cpu().numpy()
-		cf_adj_np = cf_adj.cpu().numpy()
-		adj_diff = np.linalg.norm(ori_adj_np - cf_adj_np, ord='fro')
+		# 1. Proximity（与 MyExplainer 定义保持一致）
+		proximity_sum += compute_proximity_from_edge_index(
+			ori_edge_index=edge_index,
+			cf_edge_index=cf_edge_index,
+			num_nodes=x.size(0),
+			device=device,
+		)
 
-		m_ori = ori_data.num_edges // 2
-		m_cf = cf_data.num_edges // 2
-		max_m = max(m_ori, m_cf, 1)  # 避免除以0
+		# 2. Fidelity（概率版）
+		fidelity_prob_sum += compute_fidelity_prob_from_probs(
+			ori_probs=ori_prob,
+			cf_probs=cf_prob,
+		)
 
-		proximity = adj_diff / max_m
-		proximity_sum += proximity
-
-		# 2. Fidelity Calculation
-		# 关注原图预测类别的概率下降了多少 (即使没翻转，概率下降也是贡献)
-		ori_prob_on_ori_class = ori_prob[ori_pred].item()
-		cf_prob_on_ori_class = cf_prob[ori_pred].item()
-		fidelity_prob = ori_prob_on_ori_class - cf_prob_on_ori_class
-		fidelity_prob_sum += fidelity_prob
-
-		# 3. Sparsity Calculation
-		ori_edge_set = set()
-		for i in range(edge_index.size(1)):
-			u, v = edge_index[0, i].item(), edge_index[1, i].item()
-			ori_edge_set.add((min(u, v), max(u, v)))
-
-		cf_edge_set = set()
-		for i in range(cf_edge_index.size(1)):
-			u, v = cf_edge_index[0, i].item(), cf_edge_index[1, i].item()
-			cf_edge_set.add((min(u, v), max(u, v)))
-
-		# 变化的边数
-		exp_edges = ori_edge_set.symmetric_difference(cf_edge_set)
-		num_exp_edges = len(exp_edges)
-		num_ori_edges = len(ori_edge_set)
-
-		# Sparsity定义：1 - (改变的边 / 原有的边)
-		sparsity = 1 - (num_exp_edges / max(num_ori_edges, 1))
-		sparsity_sum += sparsity
+		# 3. Sparsity
+		sparsity_sum += compute_sparsity_from_edge_index(
+			ori_edge_index=edge_index,
+			cf_edge_index=cf_edge_index,
+		)
 
 	# --- 3. 结果汇总 ---
 	# Validity: 成功数 / 总数

@@ -537,7 +537,7 @@ def visualize_comparison(data, cf_edge_index, ori_pred, cf_pred, idx, save_dir='
 # 4. 运行入口
 # ==========================================
 if __name__ == "__main__":
-    dataset_name = 'mutag'  # 或者 nci1, ba2motif
+    dataset_name = 'nci1'  # 或者 nci1, ba2motif
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     print(f"Using dataset: {dataset_name}")
@@ -545,7 +545,7 @@ if __name__ == "__main__":
     try:
         # 加载数据集和预训练模型
         train_dataset, val_dataset, test_dataset = get_datasets(name=dataset_name, root='../data/')
-        model_path = f'../param/gnns/{dataset_name}_gcn.pt'
+        model_path = f'param/gnns/NCI1_gcn.pt'
 
         if os.path.exists(model_path):
             gnn = torch.load(model_path, map_location=device)

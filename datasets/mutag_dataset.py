@@ -98,16 +98,8 @@ class Mutagenicity(InMemoryDataset):
                 name="mutag_%d" % i,
                 idx=i,
             )
-
-            # 去重
-            if data.smiles in seen_smiles:
-                begin = end
-                continue
-            seen_smiles.add(data.smiles)
-
+            data_list.append(data)
             begin = end
-            if data.idx not in [985, 3348, 3968, 3975, 4306, 2079, 3571, 4010, 1804, 1528, 2234, 2482, 277, 518, 93, 4188] and data.smiles:
-                data_list.append(data)
 
         print(f"Total graphs: {len(data_list)}")
         # assert len(data_list) == 4247

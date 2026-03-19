@@ -2,17 +2,22 @@ import os
 
 import networkx as nx
 import torch
-import torch.nn.functional as F
 import torch.nn as nn
+import torch.nn.functional as F
 from matplotlib import pyplot as plt
 from torch.nn.parameter import Parameter
-from torch_geometric.utils import to_dense_adj, to_undirected, sort_edge_index, k_hop_subgraph, to_networkx
+from torch_geometric.utils import to_undirected, sort_edge_index, k_hop_subgraph, to_networkx
 from tqdm import tqdm
 import math
 
 
 # 假设 utils.py 和 gnns.py 在当前目录下
 from utils import get_datasets
+from utils.baseline_eval_metrics import (
+    compute_proximity_from_edge_index,
+    compute_fidelity_prob_from_probs,
+    compute_sparsity_from_edge_index,
+)
 from gnns import *
 
 
@@ -308,28 +313,24 @@ def evaluate_c2_structural(pred_model, dataset, device, epochs=100, lr=0.05):
         if cf_pred != ori_pred:
             valid_cf += 1
 
-        # B. 无论是否翻转成功，都计算指标！
-
-        # --- Proximity ---
+        # B. 无论是否翻转成功，都计算指标（与 MyExplainer 保持一致）
         num_nodes = data.x.size(0)
-        ori_adj = to_dense_adj(data.edge_index, max_num_nodes=num_nodes).squeeze(0)
-        cf_adj = to_dense_adj(cf_edge_index, max_num_nodes=num_nodes).squeeze(0)
+        proximity_sum += compute_proximity_from_edge_index(
+            ori_edge_index=data.edge_index,
+            cf_edge_index=cf_edge_index,
+            num_nodes=num_nodes,
+            device=device,
+        )
 
-        adj_diff = torch.norm(ori_adj - cf_adj, p='fro').item()
-        # 注意：如果反事实图完全没变，这里是 0
-        max_m = max(data.edge_index.size(1) // 2, cf_edge_index.size(1) // 2, 1)
-        proximity_sum += (adj_diff / max_m)
+        fidelity_prob_sum += compute_fidelity_prob_from_probs(
+            ori_probs=ori_probs,
+            cf_probs=cf_probs,
+        )
 
-        # --- Fidelity (Prob Drop) ---
-        # 即使没翻转，概率也可能下降了（例如从 0.9 降到 0.6，虽然还是预测类别 0）
-        fidelity_prob_sum += (ori_probs[ori_pred].item() - cf_probs[ori_pred].item())
-
-        # --- Sparsity ---
-        ori_set = set((min(u, v), max(u, v)) for u, v in data.edge_index.t().tolist())
-        cf_set = set((min(u, v), max(u, v)) for u, v in cf_edge_index.t().tolist())
-        diff = ori_set.symmetric_difference(cf_set)
-
-        sparsity_sum += (1.0 - len(diff) / max(len(ori_set), 1))
+        sparsity_sum += compute_sparsity_from_edge_index(
+            ori_edge_index=data.edge_index,
+            cf_edge_index=cf_edge_index,
+        )
 
         if idx < 10:
             visualize_comparison(
@@ -367,14 +368,14 @@ def evaluate_c2_structural(pred_model, dataset, device, epochs=100, lr=0.05):
 # 3. 运行入口
 # ==========================================
 if __name__ == "__main__":
-    dataset_name = 'mutag'
+    dataset_name = 'nci1'
     device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
     try:
         train_dataset, val_dataset, test_dataset = get_datasets(name=dataset_name, root='../data/')
 
-        model_path = f'../param/gnns/{dataset_name}_gcn.pt'
+        model_path = f'param/gnns/NCI1_gcn.pt'
         if os.path.exists(model_path):
             gnn = torch.load(model_path, map_location=device)
             gnn.eval()
@@ -384,7 +385,7 @@ if __name__ == "__main__":
                 pred_model=gnn,
                 dataset=val_dataset,
                 device=device,
-                epochs=300,
+                epochs=100,
                 lr=0.05
             )
         else:

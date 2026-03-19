@@ -17,6 +17,11 @@ from torch_geometric.utils import to_dense_adj
 from tqdm import tqdm
 
 from utils import get_datasets
+from utils.baseline_eval_metrics import (
+    compute_proximity_from_edge_index,
+    compute_fidelity_prob_from_probs,
+    compute_sparsity_from_edge_index,
+)
 from gnns import *
 
 
@@ -600,17 +605,22 @@ def evaluate_graphcfe(
         if cf_pred == y_desired:
             valid_cf += 1
 
-        # Proximity
-        ori_adj = to_dense_adj(ori_edge_index, max_num_nodes=cf_feat.size(0)).squeeze(0)
-        adj_diff = torch.norm(ori_adj - cf_adj, p='fro').item()
-        max_m = max(ori_edge_index.size(1) // 2, cf_edge_index.size(1) // 2, 1)
-        proximity_sum += (adj_diff / max_m)
+        proximity_sum += compute_proximity_from_edge_index(
+            ori_edge_index=ori_edge_index,
+            cf_edge_index=cf_edge_index,
+            num_nodes=cf_feat.size(0),
+            device=device,
+        )
 
-        # Fidelity
-        fidelity_prob_sum += (ori_prob[ori_pred].item() - cf_prob[ori_pred].item())
+        fidelity_prob_sum += compute_fidelity_prob_from_probs(
+            ori_probs=ori_prob,
+            cf_probs=cf_prob,
+        )
 
-        # Sparsity
-        sparsity_sum += calculate_sparsity(ori_edge_index, cf_edge_index)  # 封装一下之前的逻辑
+        sparsity_sum += compute_sparsity_from_edge_index(
+            ori_edge_index=ori_edge_index,
+            cf_edge_index=cf_edge_index,
+        )
 
     # 汇总
     results = {
@@ -631,24 +641,11 @@ def to_dense_adj_sparse_format_helper(adj_binary):
 
 
 def calculate_sparsity(ori_edge_index, cf_edge_index):
-    # 原先的 Sparsity 计算逻辑
-    ori_edge_set = set()
-    for i in range(ori_edge_index.size(1)):
-        u, v = ori_edge_index[0, i].item(), ori_edge_index[1, i].item()
-        ori_edge_set.add((min(u, v), max(u, v)))
-
-    cf_edge_set = set()
-    for i in range(cf_edge_index.size(1)):
-        u, v = cf_edge_index[0, i].item(), cf_edge_index[1, i].item()
-        cf_edge_set.add((min(u, v), max(u, v)))
-
-    num_ori = len(ori_edge_set)
-    if num_ori == 0: return 0.0
-
-    # 编辑距离 / 原边数
-    diff = ori_edge_set.symmetric_difference(cf_edge_set)
-    return 1.0 - (len(diff) / num_ori)
-
+    """
+    兼容旧接口的包装函数，内部调用统一的稀疏性计算，
+    确保与 MyExplainer 的 sparsity 含义保持一致。
+    """
+    return compute_sparsity_from_edge_index(ori_edge_index, cf_edge_index)
 
 ##############################################
 # 6. 示例 main：流程类似 CF-GNNExplainer
