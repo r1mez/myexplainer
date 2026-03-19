@@ -1,1 +1,5 @@
 /param
+
+# 防止误提交 git 内部文件的拷贝/备份目录
+.Copy of git/
+.Copy of git/**
