@@ -1,4 +1,5 @@
 import numpy as np
+import time
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -14,6 +15,7 @@ from utils.baseline_eval_metrics import (
     compute_proximity_from_edge_index,
     compute_fidelity_prob_from_probs,
     compute_sparsity_from_edge_index,
+    OracleWrappedModel,
 )
 
 def vector_to_symm_matrix(
@@ -385,10 +387,11 @@ def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 	print("Evaluating CF-GNNExplainer (Metrics on ALL samples)")
 	print("=" * 60)
 
-	pred_model.eval()
-	explainer = CFExplainer(pred_model, device=device, lr=lr)
+	wrapped_model = OracleWrappedModel(pred_model)
+	wrapped_model.eval()
+	explainer = CFExplainer(wrapped_model, device=device, lr=lr)
 
-	# --- 1. 预计算阶段 ---
+	# --- 1. 预计算阶段（不计入 runtime 和 oracle_calls） ---
 	y_desired_list = []
 	ori_graphs_list = []
 	ori_prob_list = []
@@ -398,10 +401,9 @@ def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 		for data in tqdm(dataset, desc="Pre-computing"):
 			data = data.to(device)
 			ori_pred_logits = pred_model(data.x, data.edge_index, data.batch)
-			ori_prob = F.softmax(ori_pred_logits, dim=1)[0]  # [num_classes]
+			ori_prob = F.softmax(ori_pred_logits, dim=1)[0]
 			ori_pred = ori_pred_logits.argmax(dim=1).item()
 
-			# 假设二分类或多分类取反
 			y_desired = 1 - ori_pred
 
 			y_desired_list.append(y_desired)
@@ -409,14 +411,18 @@ def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 			ori_prob_list.append(ori_prob)
 
 	# --- 2. 评估循环 ---
-	valid_cf = 0  # 成功翻转的个数 (仅用于计算 Validity)
-	total_graphs = 0  # 总图数 (作为所有指标的分母)
+	valid_cf = 0
+	total_graphs = 0
 
 	proximity_sum = 0.0
 	fidelity_prob_sum = 0.0
 	sparsity_sum = 0.0
 
+	total_cf_time = 0.0
+	total_cf_oracle_calls = 0
+
 	print("\n2. Generating counterfactuals and computing metrics...")
+
 	for idx in tqdm(range(len(dataset)), desc="Evaluating"):
 		total_graphs += 1
 		ori_data = ori_graphs_list[idx]
@@ -428,14 +434,16 @@ def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 		ori_prob = ori_prob_list[idx]
 		ori_pred = 1 - y_desired
 
-		# 原图处理
 		ori_adj = to_dense_adj(edge_index, max_num_nodes=x.size(0)).squeeze(0).to(device)
 
-		# 运行 Explainer 生成 CF
+		# 运行 Explainer 生成 CF —— 仅此阶段计入 runtime 和 oracle_calls
 		y_pred_tensor = torch.tensor([ori_pred], device=device)
+		calls_before = wrapped_model.oracle_calls
+		t0 = time.time()
 		cf_adj = explainer.run_one_graph(x, edge_index, batch, ori_adj, y_pred_tensor, epochs)
+		total_cf_time += time.time() - t0
+		total_cf_oracle_calls += wrapped_model.oracle_calls - calls_before
 
-		# 转换格式
 		cf_edge_index, _ = dense_to_sparse(cf_adj)
 		cf_data = Data(
 			x=x.cpu(),
@@ -443,7 +451,7 @@ def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 			num_nodes=x.size(0)
 		)
 
-		# --- 检查 Validity ---
+		# --- 检查 Validity（不计入 oracle_calls） ---
 		with torch.no_grad():
 			cf_data_dev = cf_data.to(device)
 			cf_pred_logits = pred_model(
@@ -482,6 +490,9 @@ def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 			cf_edge_index=cf_edge_index,
 		)
 
+	avg_runtime_per_graph = total_cf_time / total_graphs if total_graphs > 0 else 0.0
+	avg_oracle_calls_per_graph = total_cf_oracle_calls / total_graphs if total_graphs > 0 else 0.0
+
 	# --- 3. 结果汇总 ---
 	# Validity: 成功数 / 总数
 	validity = valid_cf / total_graphs if total_graphs > 0 else 0.0
@@ -503,6 +514,8 @@ def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 	print(f"  Proximity (avg all) ↓: {avg_proximity:.4f}")
 	print(f"  Fidelity (avg all) ↑: {avg_fidelity_prob:.4f}")
 	print(f"  Sparsity (avg all) ↑: {avg_sparsity:.4f}")
+	print(f"  Runtime per graph (s) ↓: {avg_runtime_per_graph:.6f}")
+	print(f"  Oracle calls per graph ↓: {avg_oracle_calls_per_graph:.4f}")
 	print("=" * 60 + "\n")
 
 	return {
@@ -512,6 +525,8 @@ def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 		"sparsity": avg_sparsity,
 		"successful": valid_cf,
 		"total": total_graphs,
+		"runtime": avg_runtime_per_graph,
+		"oracle_calls": avg_oracle_calls_per_graph,
 	}
 
 if __name__ == "__main__":
@@ -523,7 +538,7 @@ if __name__ == "__main__":
 	print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
 
 	print("\n2. Loading pre-trained GNN classifier...")
-	gnn = torch.load(f'../param/gnns/{dataset_name}_gcn.pt', map_location=device)
+	gnn = torch.load(f'param/gnns/{dataset_name}_gcn.pt', map_location=device)
 	gnn.eval()
 	print("  GNN loaded successfully")
 

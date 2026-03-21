@@ -29,7 +29,7 @@ def parse_args():
 
     # 基础设置
     parser.add_argument('--cuda', type=int, default=2, help='GPU device')
-    parser.add_argument('--dataset', type=str, default='mutag', help='Dataset name')
+    parser.add_argument('--dataset', type=str, default='nci1', help='Dataset name')
     parser.add_argument('--gnn_path', type=str, default='param/', help='GNN directory')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use (cpu or cuda)')
     parser.add_argument('--train_mode',type=bool,default=True,help='Current mode')
@@ -51,7 +51,7 @@ def parse_args():
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
 
     # 训练参数
-    parser.add_argument('--epochs', type=int, default=1, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
 
@@ -217,16 +217,6 @@ def main():
             evaluation_metrics["proximity"]
         )
     )
-    # print(
-    #     "  Fidelity+ ↑: {:.4f}".format(
-    #         evaluation_metrics["fidelity+"]
-    #     )
-    # )
-    # print(
-    #     "  Fidelity- ↓: {:.4f}".format(
-    #         evaluation_metrics["fidelity-"]
-    #     )
-    # )
     print(
         "  Fidelity_prob ↑: {:.4f}".format(
             evaluation_metrics["fidelity"]
@@ -235,6 +225,16 @@ def main():
     print(
         "  Sparsity ↑: {:.4f}".format(
             evaluation_metrics["sparsity"]
+        )
+    )
+    print(
+        "  Oracle Calls: {:.4f}".format(
+            evaluation_metrics["oracle_calls"]
+        )
+    )
+    print(
+        "  Total Time: {:.4f} seconds".format(
+            evaluation_metrics["runtime"]
         )
     )
 

@@ -1,4 +1,5 @@
 import os
+import time
 
 import networkx as nx
 import torch
@@ -17,6 +18,7 @@ from utils.baseline_eval_metrics import (
     compute_proximity_from_edge_index,
     compute_fidelity_prob_from_probs,
     compute_sparsity_from_edge_index,
+    OracleWrappedModel,
 )
 from gnns import *
 
@@ -269,7 +271,8 @@ def evaluate_c2_structural(pred_model, dataset, device, epochs=100, lr=0.05):
     print("Evaluating C2Explainer (Structural Only) - ALL Samples Mode")
     print("=" * 60)
 
-    explainer = C2ExplainerStructuralOnly(pred_model, epochs=epochs, lr=lr, max_candidates=500)
+    wrapped_model = OracleWrappedModel(pred_model)
+    explainer = C2ExplainerStructuralOnly(wrapped_model, epochs=epochs, lr=lr, max_candidates=500)
 
     valid_cf = 0
     proximity_sum = 0.0
@@ -281,26 +284,33 @@ def evaluate_c2_structural(pred_model, dataset, device, epochs=100, lr=0.05):
 
     print(f"Processing {len(dataset)} graphs...")
 
+    total_cf_time = 0.0
+    total_cf_oracle_calls = 0
+
     for idx in tqdm(range(len(dataset))):
         data = dataset[idx].to(device)
 
-        # 1. 原始预测
+        # 1. 原始预测（不计入 runtime 和 oracle_calls）
         with torch.no_grad():
             ori_logits = pred_model(data.x, data.edge_index, data.batch)
             if ori_logits.dim() > 1: ori_logits = ori_logits[0]
             ori_probs = F.softmax(ori_logits, dim=-1)
             ori_pred = ori_logits.argmax().item()
 
-        # 2. 生成解释
+        # 2. 生成解释 —— 仅此阶段计入 runtime 和 oracle_calls
         batch = torch.zeros(data.x.size(0), dtype=torch.long, device=device)
+        calls_before = wrapped_model.oracle_calls
+        t0 = time.time()
         cf_edge_index, cf_x = explainer.explain_graph(data.x, data.edge_index, batch=batch)
+        total_cf_time += time.time() - t0
+        total_cf_oracle_calls += wrapped_model.oracle_calls - calls_before
 
         if cf_edge_index is None:
             continue
 
-        processed_graphs += 1  # 计数器加 1
+        processed_graphs += 1
 
-        # 3. 验证 CF
+        # 3. 验证 CF（不计入 oracle_calls）
         with torch.no_grad():
             cf_logits = pred_model(cf_x, cf_edge_index, batch)
             if cf_logits.dim() > 1: cf_logits = cf_logits[0]
@@ -342,6 +352,10 @@ def evaluate_c2_structural(pred_model, dataset, device, epochs=100, lr=0.05):
                 save_dir='cf_results_vis'  # 图片保存在这个文件夹
             )
 
+    total_graphs = len(dataset)
+    avg_runtime_per_graph = total_cf_time / total_graphs if total_graphs > 0 else 0.0
+    avg_oracle_calls_per_graph = total_cf_oracle_calls / total_graphs if total_graphs > 0 else 0.0
+
     # 汇总 (分母改为 processed_graphs)
     metrics = {
         "validity": valid_cf / processed_graphs if processed_graphs > 0 else 0,
@@ -349,7 +363,9 @@ def evaluate_c2_structural(pred_model, dataset, device, epochs=100, lr=0.05):
         "fidelity_prob": fidelity_prob_sum / processed_graphs if processed_graphs > 0 else 0,
         "sparsity": sparsity_sum / processed_graphs if processed_graphs > 0 else 0,
         "successful_count": valid_cf,
-        "total_processed": processed_graphs
+        "total_processed": processed_graphs,
+        "runtime": avg_runtime_per_graph,
+        "oracle_calls": avg_oracle_calls_per_graph,
     }
 
     print("\n" + "=" * 60)
@@ -359,6 +375,8 @@ def evaluate_c2_structural(pred_model, dataset, device, epochs=100, lr=0.05):
     print(f"  Proximity (Adj Diff) ↓: {metrics['proximity']:.4f}")
     print(f"  Fidelity (Prob Drop) ↑: {metrics['fidelity_prob']:.4f}")
     print(f"  Sparsity (Structure) ↑: {metrics['sparsity']:.4f}")
+    print(f"  Runtime per graph (s) ↓: {avg_runtime_per_graph:.6f}")
+    print(f"  Oracle calls per graph ↓: {avg_oracle_calls_per_graph:.4f}")
     print("=" * 60 + "\n")
 
     return metrics
@@ -375,7 +393,7 @@ if __name__ == "__main__":
     try:
         train_dataset, val_dataset, test_dataset = get_datasets(name=dataset_name, root='../data/')
 
-        model_path = f'param/gnns/NCI1_gcn.pt'
+        model_path = f'param/gnns/{dataset_name}_gcn.pt'
         if os.path.exists(model_path):
             gnn = torch.load(model_path, map_location=device)
             gnn.eval()

@@ -21,6 +21,7 @@ from utils.baseline_eval_metrics import (
     compute_proximity_from_edge_index,
     compute_fidelity_prob_from_probs,
     compute_sparsity_from_edge_index,
+    OracleWrappedModel,
 )
 from gnns import *
 
@@ -543,72 +544,64 @@ def evaluate_graphcfe(
     print("Evaluating GraphCFE (Topology-Only)")
     print("=" * 60)
 
-    pred_model.eval()
+    wrapped_model = OracleWrappedModel(pred_model)
+    wrapped_model.eval()
     explainer.eval()
 
-    # 1. 预计算原始预测
-    ori_probs = []
-    ori_preds = []
-    ori_edge_indices = []
-
-    # 我们仍然保存一份原始特征，双重保险
-    ori_features = []
-
-    for data in tqdm(eval_dataset, desc="Original predictions"):
-        data = data.to(device)
-        # 手动构建 batch 防止 data.batch 为 None
-        batch_vec = torch.zeros(data.x.size(0), dtype=torch.long, device=device)
-
-        ori_pred_logits = pred_model(data.x, data.edge_index, batch_vec)
-        ori_prob = F.softmax(ori_pred_logits, dim=1)[0]
-        ori_pred = ori_pred_logits.argmax(dim=1).item()
-
-        ori_probs.append(ori_prob.cpu())
-        ori_preds.append(ori_pred)
-        ori_edge_indices.append(data.edge_index.cpu())
-        ori_features.append(data.x.cpu())
-
-        # 2. 生成 CF
-    # 注意：现在 explainer 内部只生成 adj_reconst，feat_reconst 只是 copy
-    cf_feat_list, cf_adj_list, graph_idx_list = \
-        generate_cfs_with_graphcfe(pred_model, explainer, eval_dataset, device)
-
-    # 3. 计算指标
     valid_cf = 0
     proximity_sum = 0.0
     fidelity_prob_sum = 0.0
     sparsity_sum = 0.0
     total_graphs = len(eval_dataset)
 
-    for idx in tqdm(range(len(eval_dataset)), desc="Computing metrics"):
-        # 基础数据准备
-        ori_edge_index = ori_edge_indices[idx].to(device)
-        ori_prob = ori_probs[idx].to(device)
-        ori_pred = ori_preds[idx]
+    total_cf_time = 0.0
+    total_cf_oracle_calls = 0
 
-        # 强制使用原始特征 (虽然 cf_feat_list[idx] 现在也应该是原始特征，但这样写更清晰)
-        cf_feat = ori_features[idx].to(device)
+    for idx in tqdm(range(total_graphs), desc="Evaluating"):
+        data = eval_dataset[idx].to(device)
+        batch_vec = torch.zeros(data.x.size(0), dtype=torch.long, device=device)
 
-        # CF 边结构
-        cf_adj = cf_adj_list[idx].to(device)
-        cf_adj = (cf_adj > 0.5).float()  # 这里的阈值可以调整
-        cf_edge_index, _ = to_dense_adj_sparse_format_helper(cf_adj)  # 下面提供个helper防止import报错
+        # 1. 原始预测（不计入 runtime 和 oracle_calls）
+        ori_pred_logits = pred_model(data.x, data.edge_index, batch_vec)
+        ori_prob = F.softmax(ori_pred_logits, dim=1)[0]
+        ori_pred = ori_pred_logits.argmax(dim=1).item()
 
-        # CF 预测
-        batch_vec = torch.zeros(cf_feat.size(0), dtype=torch.long, device=device)
+        # 2. 生成 CF —— 仅此阶段计入 runtime 和 oracle_calls
+        num_nodes = data.x.size(0)
+        x_dense = data.x.unsqueeze(0)
+        adj = to_dense_adj(data.edge_index, max_num_nodes=num_nodes).to(device)
+
+        if num_nodes < explainer.max_num_nodes:
+            pad_size = explainer.max_num_nodes - num_nodes
+            x_dense = F.pad(x_dense, (0, 0, 0, pad_size))
+            adj = F.pad(adj, (0, pad_size, 0, pad_size))
+
+        calls_before = wrapped_model.oracle_calls
+        t0 = time.time()
+        output = explainer(x_dense, adj)
+        total_cf_time += time.time() - t0
+        total_cf_oracle_calls += wrapped_model.oracle_calls - calls_before
+
+        cf_adj = output['adj_reconst'][0, :num_nodes, :num_nodes].detach()
+        cf_adj = (cf_adj > 0.5).float()
+        cf_edge_index, _ = to_dense_adj_sparse_format_helper(cf_adj)
+
+        cf_feat = data.x
+
+        # 3. CF 预测（不计入 oracle_calls）
         cf_pred_logits = pred_model(cf_feat, cf_edge_index, batch_vec)
         cf_prob = F.softmax(cf_pred_logits, dim=1)[0]
         cf_pred = cf_pred_logits.argmax(dim=1).item()
 
-        # --- 指标计算 (保持不变) ---
+        # --- 指标计算 ---
         y_desired = 1 - ori_pred
         if cf_pred == y_desired:
             valid_cf += 1
 
         proximity_sum += compute_proximity_from_edge_index(
-            ori_edge_index=ori_edge_index,
+            ori_edge_index=data.edge_index,
             cf_edge_index=cf_edge_index,
-            num_nodes=cf_feat.size(0),
+            num_nodes=num_nodes,
             device=device,
         )
 
@@ -618,16 +611,20 @@ def evaluate_graphcfe(
         )
 
         sparsity_sum += compute_sparsity_from_edge_index(
-            ori_edge_index=ori_edge_index,
+            ori_edge_index=data.edge_index,
             cf_edge_index=cf_edge_index,
         )
 
-    # 汇总
+    avg_runtime_per_graph = total_cf_time / total_graphs if total_graphs > 0 else 0.0
+    avg_oracle_calls_per_graph = total_cf_oracle_calls / total_graphs if total_graphs > 0 else 0.0
+
     results = {
         "validity": valid_cf / total_graphs,
         "proximity": proximity_sum / total_graphs,
         "fidelity_prob": fidelity_prob_sum / total_graphs,
-        "sparsity": sparsity_sum / total_graphs
+        "sparsity": sparsity_sum / total_graphs,
+        "runtime": avg_runtime_per_graph,
+        "oracle_calls": avg_oracle_calls_per_graph,
     }
 
     print(f"Results: {results}")
@@ -667,7 +664,7 @@ if __name__ == "__main__":
 
     # ===== 2. 加载预训练 GNN 分类器 =====
     pred_model = torch.load(
-        f"../param/gnns/{dataset_name}_gcn.pt",
+        f"param/gnns/{dataset_name}_gcn.pt",
         map_location=device
     ).to(device)
     pred_model.eval()
@@ -700,5 +697,13 @@ if __name__ == "__main__":
         eval_dataset=val_dataset,
         device=device
     )
-
-    print("Final GraphCFE metrics on val:", metrics)
+    print("\n" + "=" * 60)
+    print("Evaluation Results (Calculated on ALL processed graphs):")
+    print("=" * 60)
+    print(f"  Validity ↑: {metrics['validity']:.4f}")
+    print(f"  Proximity (Adj Diff) ↓: {metrics['proximity']:.4f}")
+    print(f"  Fidelity (Prob Drop) ↑: {metrics['fidelity_prob']:.4f}")
+    print(f"  Sparsity (Structure) ↑: {metrics['sparsity']:.4f}")
+    print(f"  Runtime per graph (s) ↓: {metrics['runtime']:.6f}")
+    print(f"  Oracle calls per graph ↓: {metrics['oracle_calls']:.4f}")
+    print("=" * 60 + "\n")

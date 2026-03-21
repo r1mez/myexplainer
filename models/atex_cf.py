@@ -1,5 +1,6 @@
 import os
 import random
+import time
 
 import networkx as nx
 import torch
@@ -13,6 +14,12 @@ import math
 
 # 假设 utils.py 和 gnns.py 在当前目录下
 from utils import get_datasets
+from utils.baseline_eval_metrics import (
+    compute_proximity_from_edge_index,
+    compute_fidelity_prob_from_probs,
+    compute_sparsity_from_edge_index,
+    OracleWrappedModel,
+)
 from gnns import *
 
 # ==========================================
@@ -376,7 +383,8 @@ def evaluate_atex_cf_graph(pred_model, dataset, device, epochs=100, lr=0.01, top
     print(f"Hyperparameters: Budget(K)={top_k}, Asymmetric Cost(C)={C}")
     print("=" * 60)
 
-    explainer = ATEXCFExplainer(pred_model, epochs=epochs, lr=lr, top_k=top_k, C=C)
+    wrapped_model = OracleWrappedModel(pred_model)
+    explainer = ATEXCFExplainer(wrapped_model, epochs=epochs, lr=lr, top_k=top_k, C=C)
 
     valid_cf = 0
     proximity_sum = 0.0
@@ -386,11 +394,14 @@ def evaluate_atex_cf_graph(pred_model, dataset, device, epochs=100, lr=0.01, top
 
     print(f"Processing {len(dataset)} graphs...")
 
+    total_cf_time = 0.0
+    total_cf_oracle_calls = 0
+
     for idx in tqdm(range(len(dataset))):
         data = dataset[idx].to(device)
         batch = torch.zeros(data.x.size(0), dtype=torch.long, device=device)
 
-        # 1. 原始预测
+        # 1. 原始预测（不计入 runtime 和 oracle_calls）
         with torch.no_grad():
             _, ori_logits = pred_model.get_pred_explain(
                 data.x, data.edge_index, edge_mask=torch.ones(data.edge_index.size(1), device=device), batch=batch
@@ -399,14 +410,18 @@ def evaluate_atex_cf_graph(pred_model, dataset, device, epochs=100, lr=0.01, top
             ori_probs = F.softmax(ori_logits, dim=-1)
             ori_pred = ori_logits.argmax().item()
 
-        # 2. 生成解释 (ATEX-CF)
+        # 2. 生成解释 (ATEX-CF) —— 仅此阶段计入 runtime 和 oracle_calls
+        calls_before = wrapped_model.oracle_calls
+        t0 = time.time()
         cf_edge_index, cf_x = explainer.explain_graph(data.x, data.edge_index, batch, data)
+        total_cf_time += time.time() - t0
+        total_cf_oracle_calls += wrapped_model.oracle_calls - calls_before
 
-        if cf_edge_index is None:
-            continue
+        # if cf_edge_index is None:
+        #     continue
         processed_graphs += 1
 
-        # 3. 验证 CF
+        # 3. 验证 CF（不计入 oracle_calls）
         with torch.no_grad():
             _, cf_logits = pred_model.get_pred_explain(
                 cf_x, cf_edge_index, edge_mask=torch.ones(cf_edge_index.size(1), device=device), batch=batch
@@ -419,28 +434,24 @@ def evaluate_atex_cf_graph(pred_model, dataset, device, epochs=100, lr=0.01, top
         if cf_pred != ori_pred:
             valid_cf += 1
 
-        # --- B. 计算评价指标 ---
-        # Proximity (利用密集邻接矩阵的 Frobenius 范数)
+        # --- B. 计算评价指标（与 MyExplainer 一致） ---
         num_nodes = data.x.size(0)
-        ori_adj = to_dense_adj(data.edge_index, max_num_nodes=num_nodes).squeeze(0)
-        if cf_edge_index.numel() > 0 and cf_edge_index.size(1) > 0:
-            cf_adj = to_dense_adj(cf_edge_index, max_num_nodes=num_nodes).squeeze(0)
-        else:
-            cf_adj = torch.zeros((num_nodes, num_nodes), device=device)
+        proximity_sum += compute_proximity_from_edge_index(
+            ori_edge_index=data.edge_index,
+            cf_edge_index=cf_edge_index,
+            num_nodes=num_nodes,
+            device=device,
+        )
 
-        adj_diff = torch.norm(ori_adj - cf_adj, p='fro').item()
-        max_m = max(data.edge_index.size(1) // 2, cf_edge_index.size(1) // 2, 1)
-        proximity_sum += (adj_diff / max_m)
+        fidelity_prob_sum += compute_fidelity_prob_from_probs(
+            ori_probs=ori_probs,
+            cf_probs=cf_probs,
+        )
 
-        # Fidelity (概率下降)
-        fidelity_prob_sum += (ori_probs[ori_pred].item() - cf_probs[ori_pred].item())
-        print(f"ori_probs - cf_prob = {ori_probs[ori_pred].item()} - {cf_probs[ori_pred].item()} = {ori_probs[ori_pred].item() - cf_probs[ori_pred].item()}")
-        # Sparsity
-        ori_set = set((min(u, v), max(u, v)) for u, v in data.edge_index.t().tolist())
-        cf_set = set((min(u, v), max(u, v)) for u, v in cf_edge_index.t().tolist())
-        diff = ori_set.symmetric_difference(cf_set)
-
-        sparsity_sum += (1.0 - len(diff) / max(len(ori_set), 1))
+        sparsity_sum += compute_sparsity_from_edge_index(
+            ori_edge_index=data.edge_index,
+            cf_edge_index=cf_edge_index,
+        )
 
         if idx < 10:
             visualize_comparison(
@@ -452,6 +463,10 @@ def evaluate_atex_cf_graph(pred_model, dataset, device, epochs=100, lr=0.01, top
                 save_dir='cf_results_vis'  # 图片保存在这个文件夹
             )
 
+    total_graphs = len(dataset)
+    avg_runtime_per_graph = total_cf_time / total_graphs if total_graphs > 0 else 0.0
+    avg_oracle_calls_per_graph = total_cf_oracle_calls / total_graphs if total_graphs > 0 else 0.0
+    print("processed_graphs: ", processed_graphs)
     # 汇总
     metrics = {
         "validity": valid_cf / processed_graphs if processed_graphs > 0 else 0,
@@ -459,7 +474,9 @@ def evaluate_atex_cf_graph(pred_model, dataset, device, epochs=100, lr=0.01, top
         "fidelity_prob": fidelity_prob_sum / processed_graphs if processed_graphs > 0 else 0,
         "sparsity": sparsity_sum / processed_graphs if processed_graphs > 0 else 0,
         "successful_count": valid_cf,
-        "total_processed": processed_graphs
+        "total_processed": processed_graphs,
+        "runtime": avg_runtime_per_graph,
+        "oracle_calls": avg_oracle_calls_per_graph,
     }
 
     print("\n" + "=" * 60)
@@ -469,6 +486,8 @@ def evaluate_atex_cf_graph(pred_model, dataset, device, epochs=100, lr=0.01, top
     print(f"  Proximity (Adj Diff) ↓: {metrics['proximity']:.4f}")
     print(f"  Fidelity (Prob Drop) ↑: {metrics['fidelity_prob']:.4f}")
     print(f"  Sparsity (Structure) ↑: {metrics['sparsity']:.4f}")
+    print(f"  Runtime per graph (s) ↓: {avg_runtime_per_graph:.6f}")
+    print(f"  Oracle calls per graph ↓: {avg_oracle_calls_per_graph:.4f}")
     print("=" * 60 + "\n")
 
     return metrics
@@ -545,7 +564,7 @@ if __name__ == "__main__":
     try:
         # 加载数据集和预训练模型
         train_dataset, val_dataset, test_dataset = get_datasets(name=dataset_name, root='../data/')
-        model_path = f'param/gnns/NCI1_gcn.pt'
+        model_path = f'param/gnns/{dataset_name}_gcn.pt'
 
         if os.path.exists(model_path):
             gnn = torch.load(model_path, map_location=device)
