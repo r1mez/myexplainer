@@ -805,6 +805,7 @@ that obtain the desired labels when evaluated by a pre-trained GNN model.
 
 from typing import Dict, Tuple
 
+import time
 import numpy as np
 import torch
 from networkx.classes import subgraph
@@ -820,18 +821,40 @@ import torch.nn.functional as F
 from utils.vis_utils import visualize_explainer_graph
 
 
+class _OracleWrappedGNN:
+    """
+    简单的 GNN 包装器，用于在评估时统计 oracle 调用次数。
+    所有对 gnn.get_pred 的调用都会累加到 oracle_calls 计数器中。
+    """
+
+    def __init__(self, gnn: torch.nn.Module):
+        self.gnn = gnn
+        self.oracle_calls = 0
+
+    def get_pred(self, *args, **kwargs):
+        self.oracle_calls += 1
+        return self.gnn.get_pred(*args, **kwargs)
+
+    def eval(self):
+        self.gnn.eval()
+
+
 def evaluate(args, model, gnn, data_loader):
     model.eval()
-    gnn.eval()
+
+    # 使用包装器统计 oracle 调用次数
+    wrapped_gnn = _OracleWrappedGNN(gnn)
+    wrapped_gnn.eval()
     args.train_mode = False
 
+    eval_start_time = time.time()
 
     y_desired_all = []
     ori_prob_all = []
     with torch.no_grad():
         for batch in data_loader:
             origraphs = batch['graphs'].to(args.device)
-            _, ori_pred_logits = gnn.get_pred(origraphs.x, origraphs.edge_index, origraphs.batch)
+            _, ori_pred_logits = wrapped_gnn.get_pred(origraphs.x, origraphs.edge_index, origraphs.batch)
             ori_prob = F.softmax(ori_pred_logits, dim=1)
             ori_pred = ori_pred_logits.argmax(dim=1)
             y_desired = (1 - ori_pred).float().unsqueeze(1)
@@ -887,9 +910,9 @@ def evaluate(args, model, gnn, data_loader):
                     print(f"  Graph {i}: ori_edges={ori_edges}, cf_edges={cf_edges}, exp_edges={exp_edges}")
                     print(f"            sparsity = 1 - ({exp_edges}/{ori_edges}) = {1 - exp_edges/ori_edges:.4f}")
 
-            valid_cf += count_valid(y_desired, cf_graphs, gnn)
+            valid_cf += count_valid(y_desired, cf_graphs, wrapped_gnn)
             proximity += compute_proximity(args, cf_graphs, origraphs)
-            fidel_sum += compute_fidelity_prob(args, origraphs, cf_graphs, ori_prob_all[batch_idx], gnn)
+            fidel_sum += compute_fidelity_prob(args, origraphs, cf_graphs, ori_prob_all[batch_idx], wrapped_gnn)
             sparsity_sum += compute_sparsity(args, origraphs, cf_graphs)
 
 
@@ -903,6 +926,9 @@ def evaluate(args, model, gnn, data_loader):
 
 
 
+    total_runtime = time.time() - eval_start_time
+    total_oracle_calls = wrapped_gnn.oracle_calls
+
     args.train_mode = True
 
     return {
@@ -912,6 +938,8 @@ def evaluate(args, model, gnn, data_loader):
         "sparsity": sparsity,
         "successful": valid_cf,
         "total": total,
+        "runtime": total_runtime,
+        "oracle_calls": total_oracle_calls,
     }
 
 
