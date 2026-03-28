@@ -650,8 +650,8 @@ def calculate_sparsity(ori_edge_index, cf_edge_index):
 
 if __name__ == "__main__":
 
-    dataset_name = "nci1"
-    device = "cuda:1" if torch.cuda.is_available() else "cpu"
+    dataset_name = "mutag"
+    device = "cuda:2" if torch.cuda.is_available() else "cpu"
 
     # ===== 1. 加载/构造 GraphDataset =====
     train_dataset, val_dataset, test_dataset = get_datasets(
@@ -683,7 +683,7 @@ if __name__ == "__main__":
     explainer = train_graphcfe(
         pred_model=pred_model,
         train_dataset=train_dataset,
-        epochs=100,
+        epochs=10,
         device=device,
         lr=1e-3,
         model_path=explainer_model_path,

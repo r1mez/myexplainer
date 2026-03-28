@@ -386,12 +386,12 @@ def evaluate_c2_structural(pred_model, dataset, device, epochs=100, lr=0.05):
 # 3. 运行入口
 # ==========================================
 if __name__ == "__main__":
-    dataset_name = 'nci1'
+    dataset_name = 'mutag'
     device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
     try:
-        train_dataset, val_dataset, test_dataset = get_datasets(name=dataset_name, root='../data/')
+        train_dataset, val_dataset, test_dataset = get_datasets(name=dataset_name, root='data/')
 
         model_path = f'param/gnns/{dataset_name}_gcn.pt'
         if os.path.exists(model_path):
@@ -401,7 +401,7 @@ if __name__ == "__main__":
             # 运行评估 (仅结构)
             evaluate_c2_structural(
                 pred_model=gnn,
-                dataset=val_dataset,
+                dataset=test_dataset,
                 device=device,
                 epochs=100,
                 lr=0.05

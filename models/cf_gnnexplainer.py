@@ -530,11 +530,11 @@ def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 	}
 
 if __name__ == "__main__":
-	dataset_name = 'nci1'
+	dataset_name = 'mutag'
 	device = 'cuda:2'
 
 	print("\n1. Loading datasets...")
-	train_dataset, val_dataset, test_dataset = get_datasets(name=dataset_name, root='../data/')
+	train_dataset, val_dataset, test_dataset = get_datasets(name=dataset_name, root='data/')
 	print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
 
 	print("\n2. Loading pre-trained GNN classifier...")
@@ -546,7 +546,7 @@ if __name__ == "__main__":
 	print("\n3. Evaluating CF-GNNExplainer on validation set...")
 	metrics = evaluate_cf_gnnexplainer(
 		pred_model=gnn,
-		dataset=val_dataset,
+		dataset=test_dataset,
 		device=device,
 		lr=0.01,
 		epochs=100  # 每个图优化100步

@@ -21,7 +21,7 @@ def subgraph_mining(args,datasets):
             for i in range(50):
                 patterns_1.append(graphsampler(25,Bdist, mean_estimate, result, Adj))
         # mutag 417, nci1 111
-        if args.dataset == 'mutag' or args.dataset == 'nci1':
+        if args.dataset == 'mutag':
             X, Adj = GraphRepModelDiscrete(datasets[0],417)
             for i in range(100):
                 patterns_0.append(graphsamplerDiscrete(417,X, Adj))
