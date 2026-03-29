@@ -198,8 +198,10 @@ def compute_proximity(args, cf_graphs, ori_graphs):
         # 步骤 2: 转换为稠密矩阵 (强制指定 max_num_nodes=N)
         # 这确保了 orig_adj 和 cf_adj 形状严格一致 [N, N]
         # ---------------------------------------------------------
-        orig_adj = to_dense_adj(orig_data.edge_index, max_num_nodes=N).squeeze(0)
-        cf_adj = to_dense_adj(cf_data.edge_index, max_num_nodes=N).squeeze(0)
+        orig_adj = to_dense_adj(orig_data.edge_index, max_num_nodes=N).squeeze(0) \
+            if orig_data.edge_index.numel() > 0 else torch.zeros(N, N, device=args.device)
+        cf_adj = to_dense_adj(cf_data.edge_index, max_num_nodes=N).squeeze(0) \
+            if cf_data.edge_index.numel() > 0 else torch.zeros(N, N, device=args.device)
 
         # ---------------------------------------------------------
         # 步骤 3: 计算差异 (使用 L1 范数)

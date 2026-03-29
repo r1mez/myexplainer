@@ -97,6 +97,8 @@ def output_to_batch(graphs, outputs, use_hard=True, thresh=0.5) -> Batch:
 
     B = int(batch.max().item()) + 1
     device = x_all.device
+    # PyG 的 Batch.from_data_list 要求每张 Data 的键一致；若部分图有 edge_weight、部分无边且未设该键会 KeyError
+    store_edge_weight = edge_weight_cf is not None
 
     data_list = []
 
@@ -143,7 +145,7 @@ def output_to_batch(graphs, outputs, use_hard=True, thresh=0.5) -> Batch:
         else:
             # 这一图在 CF 中没有任何边（极端情况）
             edge_index_local = torch.empty((2, 0), dtype=torch.long, device=device)
-            edge_weight_local = None
+            edge_weight_local = torch.empty(0, device=device) if store_edge_weight else None
 
         # 节点特征
         x_g = x_all[node_idx]
