@@ -4,17 +4,20 @@ import os.path as osp
 import random
 import time
 import sys
-sys.path.append("..")
+# 基于脚本位置加入项目根目录，避免依赖当前工作目录（直接 python /path/to/proteins_gnn.py 时也能找到 datasets）
+_ROOT = osp.dirname(osp.dirname(osp.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 import torch
 import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss, Linear, ModuleList, ReLU, Softmax, BatchNorm1d
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch_geometric.data import DataLoader
-from torch_geometric.nn import GCNConv, global_mean_pool
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import GCNConv, global_mean_pool, global_max_pool
 
 from datasets.proteins_dataset import PROTEINS
 from utils import Gtest, Gtrain, set_seed
-
+import copy
 
 EPS = 1
 
@@ -25,7 +28,7 @@ def parse_args():
     parser.add_argument(
         "--data_path",
         nargs="?",
-        default=osp.join(osp.dirname(__file__), "..", "data", "PROTEINS"),
+        default=osp.join(osp.dirname(__file__), "..", "data", "proteins"),
         help="Input data path.",
     )
     parser.add_argument(
@@ -45,21 +48,19 @@ def parse_args():
     )
     return parser.parse_args()
 
-
 class PROTEINSGCN(torch.nn.Module):
     """
     PROTEINS 图分类模型（GCN）：
-      - 输入节点特征维度：3（连续属性，PROTEINS_node_attributes.txt）
-      - 网络结构：多层 GCNConv + BatchNorm1d + ReLU + Dropout + global_mean_pool + MLP 分类头
-      - 与 BA2MotifGCN 保持完全一致的接口，便于后续解释器调用（get_pred_explain 支持 edge_mask）
+      - 优化：引入 gnn.py 核心架构，将 Readout 改为 global_max_pool，精简分类头为单层 Linear。
+      - 接口：完全保持原样，兼容后续解释器调用。
     """
     def __init__(
         self,
         in_channels: int,
         num_unit: int = 3,
-        hidden_dim: int = 64,
+        hidden_dim: int = 128,
         num_classes: int = 2,
-        dropout: float = 0.4,
+        dropout: float = 0.1,
     ):
         super().__init__()
 
@@ -68,7 +69,7 @@ class PROTEINSGCN(torch.nn.Module):
         self.num_classes = num_classes
         self.dropout = dropout
 
-        # ---- GCN 卷积层 ----
+        # ---- GCN 卷积层 (保持不变) ----
         self.convs = ModuleList()
         self.bns   = ModuleList()
         self.act   = ReLU()
@@ -81,10 +82,8 @@ class PROTEINSGCN(torch.nn.Module):
             self.convs.append(conv)
             self.bns.append(bn)
 
-        # ---- 图级分类头 ----
-        self.lin1 = Linear(hidden_dim, hidden_dim)
-        self.lin2 = Linear(hidden_dim, num_classes)
-        self.relu = ReLU()
+        # ---- 图级分类头 (优化：对齐 gnn.py 使用单层 Linear) ----
+        self.fc = Linear(hidden_dim, num_classes)
         self.softmax = Softmax(dim=1)
 
         self.reset_parameters()
@@ -94,50 +93,41 @@ class PROTEINSGCN(torch.nn.Module):
         for conv, bn in zip(self.convs, self.bns):
             conv.reset_parameters()
             bn.reset_parameters()
-        self.lin1.reset_parameters()
-        self.lin2.reset_parameters()
+        self.fc.reset_parameters()  # 仅需重置单层 FC
 
     def get_node_reps(self, x, edge_index, edge_weight=None):
-        """
-        得到节点表示（支持解释时的 edge_weight 掩码）
-        """
+        if x.dim() == 1:
+            x = x.unsqueeze(-1)
+        if edge_weight is None:
+            edge_weight = torch.ones(
+                (edge_index.size(1),), device=edge_index.device, dtype=x.dtype
+            )
         h = x
         for conv, bn in zip(self.convs, self.bns):
-            h = conv(h, edge_index, edge_weight=edge_weight)
+            h = conv(h, edge_index, edge_weight)
             h = bn(h)
             h = self.act(h)
             h = F.dropout(h, p=self.dropout, training=self.training)
-        return h  # [N, hidden_dim]
+        return h 
 
     def get_graph_rep(self, x, edge_index, batch, edge_weight=None):
-        """
-        图级表示：global_mean_pool
-        """
         node_x = self.get_node_reps(x, edge_index, edge_weight=edge_weight)
-        graph_x = global_mean_pool(node_x, batch)  # [B, hidden_dim]
+        # 优化：对齐 gnn.py 使用 global_max_pool
+        graph_x = global_max_pool(node_x, batch)  
         return graph_x
 
     def classifier(self, graph_x):
-        """
-        分类头
-        """
-        h = self.relu(self.lin1(graph_x))
-        logits = self.lin2(h)  # [B, num_classes]
+        # 优化：对齐 gnn.py 去除 MLP 结构，直接映射为 logits
+        logits = self.fc(graph_x)  
         return logits
 
-    # ----------------- 对外接口 -----------------
+    # ----------------- 对外接口 (完全保持不变) -----------------
     def forward(self, x, edge_index, batch):
-        """
-        标准训练/推理接口：返回 logits（供 CrossEntropyLoss 使用）
-        """
         graph_x = self.get_graph_rep(x, edge_index, batch, edge_weight=None)
         logits = self.classifier(graph_x)
         return logits
 
     def get_pred(self, x, edge_index, batch):
-        """
-        推理用：返回 (softmax 概率, logits)
-        """
         graph_x = self.get_graph_rep(x, edge_index, batch, edge_weight=None)
         logits = self.classifier(graph_x)
         probs  = self.softmax(logits)
@@ -145,9 +135,6 @@ class PROTEINSGCN(torch.nn.Module):
         return probs, logits
 
     def get_pred_explain(self, x, edge_index, edge_mask, batch, mask_is_logit=False):
-        """
-        解释用接口（与 BA2MotifGCN 完全一致）
-        """
         if mask_is_logit:
             edge_weight = (edge_mask * EPS).sigmoid()
         else:
@@ -169,7 +156,6 @@ if __name__ == "__main__":
     val_dataset = PROTEINS(args.data_path, mode="evaluation")
     test_dataset = PROTEINS(args.data_path, mode="testing")
 
-    # PROTEINS 数据集节点特征维度为 3（连续属性）
     in_channels = train_dataset.num_features
 
     model = PROTEINSGCN(
@@ -187,6 +173,7 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.8, patience=10, min_lr=1e-4)
     min_error = None
+    best_model_wts = copy.deepcopy(model.state_dict()) # 初始化最佳模型权重
 
     for epoch in range(1, args.epoch + 1):
         t1 = time.time()
@@ -199,8 +186,11 @@ if __name__ == "__main__":
         val_error, val_acc = Gtest(val_loader, model, device=device, criterion=CrossEntropyLoss())
         test_error, test_acc = Gtest(test_loader, model, device=device, criterion=CrossEntropyLoss())
         scheduler.step(val_error)
-        if min_error is None or val_error <= min_error:
+        
+        # 判断并保存验证集上的最佳模型权重
+        if min_error is None or val_error < min_error:
             min_error = val_error
+            best_model_wts = copy.deepcopy(model.state_dict())
 
         t2 = time.time()
 
@@ -218,7 +208,10 @@ if __name__ == "__main__":
             "Validation acc: {:5f}".format(epoch, t2 - t1, lr, loss, train_acc, val_error, val_acc)
         )
 
+    model.load_state_dict(best_model_wts)
+
     save_path = "proteins_gcn.pt"
     if not osp.exists(args.model_path):
         os.makedirs(args.model_path)
+    # 此时保存的是最佳模型
     torch.save(model.cpu(), osp.join(args.model_path, save_path))

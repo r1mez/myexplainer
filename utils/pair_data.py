@@ -29,8 +29,9 @@ class MappedDataset(Dataset):
             pred_labels: 预训练GNN的分类结果
             patterns: 频繁子图的字典（{0：patterns_0, 1: patterns_1}）
         """
-        self.patterns_0 = patterns[0]
-        self.patterns_1 = patterns[1]
+        # 预先缓存 pattern 的 igraph 表示，避免为每个样本重复转换
+        self.patterns_0 = self._prepare_patterns(patterns[0])
+        self.patterns_1 = self._prepare_patterns(patterns[1])
         self.device = args.device
         self.graphs = []  # 存储所有单个图
         self.subgraphs = []  # 存储所有图的频繁子图
@@ -56,6 +57,15 @@ class MappedDataset(Dataset):
     def _process_graphs(self, dataset):
         for data in dataset:
             self.graphs.append(data)
+
+    def _prepare_patterns(self, patterns):
+        prepared_patterns = []
+        for pattern_nx in patterns:
+            prepared_patterns.append({
+                "nx": pattern_nx,
+                "ig": nx_to_igraph(pattern_nx),
+            })
+        return prepared_patterns
 
     def _precompute_masks(self):
         """
@@ -110,28 +120,31 @@ class MappedDataset(Dataset):
         """
         # 1. 先把当前大图 graph_nx 转成 igraph.Graph
         g_ig = nx_to_igraph(graph_nx)
+        graph_colors = g_ig.vs["node_color"] if "node_color" in g_ig.vs.attributes() else None
 
         best_match_vertices = None  # 记录在大图中的匹配顶点（ig 的顶点 id）
 
         # 假设 patterns 已经按“从大到小”排序（你原来就是这么设计的）
-        for pattern_nx in patterns:
-            # 2. 每个 pattern 也转成 igraph.Graph
-            p_ig = nx_to_igraph(pattern_nx)
+        for pattern in patterns:
+            p_ig = pattern["ig"]
+            pattern_colors = p_ig.vs["node_color"] if "node_color" in p_ig.vs.attributes() else None
 
-            # 3. 用 VF2 搜索所有子图同构映射
-            #    调用形式：target.get_subisomorphisms_vf2(pattern)
-            #    返回的是一个 list，每个元素是一个长度为 vcount(pattern) 的顶点 id 列表
-            mappings = g_ig.get_subisomorphisms_vf2(p_ig)
+            # 2. 先用带节点类型约束的 VF2 做存在性判断，并直接返回首个映射
+            #    这里只需要一个匹配，不再枚举全部匹配结果。
+            is_match, _, mapping_21 = g_ig.subisomorphic_vf2(
+                p_ig,
+                color1=graph_colors,
+                color2=pattern_colors,
+                return_mapping_21=True,
+            )
 
-            if not mappings:
+            if not is_match or mapping_21 is None:
                 # 这个 pattern 没有匹配，换下一个 pattern
                 continue
-            # else:
-            #     print("  Found a match!")
 
             # 因为 patterns 假定已经按 size 从大到小排过，
             # 找到的第一个 pattern 就是“最大”的，直接拿这个匹配即可
-            best_match_vertices = mappings[0]  # 比如 [3, 7, 10, 11] 这样的 igraph 顶点 id
+            best_match_vertices = mapping_21  # pattern 顶点 -> graph 顶点
             break
 
         # 4. 如果一个 pattern 都没匹配上，就退回原图
@@ -242,7 +255,7 @@ def train_collate_fn(batch):
 
 def nx_to_igraph(g_nx: nx.Graph) -> ig.Graph:
     """
-    把 networkx.Graph 转成 igraph.Graph，并在 vertex 属性里保存原始 node id
+    把 networkx.Graph 转成 igraph.Graph，并缓存用于 VF2 剪枝的节点颜色。
     """
     # 固定一个节点顺序，给每个 nx 节点分配一个连续的 0..n-1 下标
     g_nx = remove_self_loops(g_nx)
@@ -252,11 +265,40 @@ def nx_to_igraph(g_nx: nx.Graph) -> ig.Graph:
     # 用这些下标来建 igraph 的边
     edges = [(node_index[u], node_index[v]) for u, v in g_nx.edges()]
 
-    g_ig = ig.Graph(edges=edges, directed=g_nx.is_directed())
+    g_ig = ig.Graph(n=len(nodes), edges=edges, directed=g_nx.is_directed())
     # 把原始的 node id 存在属性里，后面再映射回来
     g_ig.vs["orig_id"] = nodes
+    g_ig.vs["node_color"] = [_infer_node_color(g_nx.nodes[node]) for node in nodes]
 
     return g_ig
+
+
+def _infer_node_color(node_attrs) -> int:
+    """
+    为 VF2 提供节点颜色约束。
+    对 one-hot / 概率向量使用 argmax；对标量则直接取整。
+    """
+    if "type" in node_attrs:
+        return int(node_attrs["type"])
+
+    x = node_attrs.get("x")
+    if x is None:
+        return -1
+
+    if isinstance(x, torch.Tensor):
+        x = x.detach().cpu().numpy()
+    elif isinstance(x, list):
+        x = np.asarray(x)
+
+    if np.isscalar(x):
+        return int(x)
+
+    x = np.asarray(x).reshape(-1)
+    if x.size == 0:
+        return -1
+    if x.size == 1:
+        return int(round(float(x[0])))
+    return int(np.argmax(x))
 
 def remove_self_loops(g: nx.Graph) -> nx.Graph:
     """返回一个拷贝，并去掉所有自环边（u,u）"""

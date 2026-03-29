@@ -5,6 +5,7 @@ from datasets import NCI1
 from datasets import bbbp
 from datasets import BA2Motif
 from datasets import Benzene
+from datasets import PROTEINS
 
 def get_datasets(name, root="data/"):
     """
@@ -39,6 +40,11 @@ def get_datasets(name, root="data/"):
         train_dataset = Benzene(folder, mode="training")
         test_dataset = Benzene(folder, mode="testing")
         val_dataset = Benzene(folder, mode="evaluation")
+    elif name == "proteins":
+        folder = os.path.join(root, "proteins")
+        train_dataset = PROTEINS(folder, mode="training")
+        test_dataset = PROTEINS(folder, mode="testing")
+        val_dataset = PROTEINS(folder, mode="evaluation")
     else:
         raise ValueError
     return train_dataset, val_dataset, test_dataset

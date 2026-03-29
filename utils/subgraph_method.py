@@ -35,6 +35,19 @@ def subgraph_mining(args,datasets):
             X, Adj = GraphRepModelDiscrete(datasets[1],111)
             for i in range(100):
                 patterns_1.append(graphsamplerDiscrete(111,X, Adj))
+        if args.dataset == 'proteins':
+            # 槽位行数 N 须 ≥ 该类内最大节点数，否则 X[j] 行越界（PROTEINS 常有图 >75 节点）
+            nf0 = max((int(d.x.shape[1]) for d in datasets[0]), default=1)
+            nf1 = max((int(d.x.shape[1]) for d in datasets[1]), default=1)
+            nf = max(nf0, nf1)
+            N0 = max((int(d.num_nodes) for d in datasets[0]), default=1)
+            N1 = max((int(d.num_nodes) for d in datasets[1]), default=1)
+            X, Adj = GraphRepModelDiscrete(datasets[0], N0)
+            for i in range(100):
+                patterns_0.append(graphsamplerDiscrete(N0, X, Adj, num_node_features=nf))
+            X, Adj = GraphRepModelDiscrete(datasets[1], N1)
+            for i in range(100):
+                patterns_1.append(graphsamplerDiscrete(N1, X, Adj, num_node_features=nf))
         # 对patterns中的所有图按照key1(节点数)和key2(度数)进行排序
         sort_key = lambda G: (G.number_of_nodes(), nx.density(G))
         patterns_0.sort(key=sort_key, reverse=True)
@@ -122,7 +135,7 @@ def GraphRepModel(classdata,N):
     Adj=Adj/numgraphs
     return Bdist, mean_estimate, result, Adj
 
-def graphsampler(N, Bdist, mean_estimate, result, Adj, threshold=0.97):
+def graphsampler(N, Bdist, mean_estimate, result, Adj, threshold=0.97, visualize=False):
     """
     Gen-GraphEx 生成器（集成阈值过滤版）
 
@@ -206,13 +219,15 @@ def graphsampler(N, Bdist, mean_estimate, result, Adj, threshold=0.97):
     # G = nx.convert_node_labels_to_integers(G)
 
     # --- 绘图 (可选) ---
-    # 使用 spring_layout 布局，seed 固定以保证结果可复现
-    plt.figure(figsize=(6, 6))
-    pos = nx.spring_layout(G, seed=42)
-    nx.draw_networkx(G, pos=pos, node_size=50, node_color='red',
-                     edge_color='gray', with_labels=True, width=1.5)
-    plt.title(f"Generated Graph (Threshold={threshold})")
-    plt.show()
+    if visualize:
+        # 使用 spring_layout 布局，seed 固定以保证结果可复现
+        plt.figure(figsize=(6, 6))
+        pos = nx.spring_layout(G, seed=42)
+        nx.draw_networkx(G, pos=pos, node_size=50, node_color='red',
+                         edge_color='gray', with_labels=True, width=1.5)
+        plt.title(f"Generated Graph (Threshold={threshold})")
+        plt.show()
+        plt.close()
 
     return G
 
@@ -224,44 +239,43 @@ def GraphRepModelDiscrete(targetclass, N=111):
     Gen-GraphEx 图表示模型（通用适配版）
     自动适配 targetclass 中的特征维度。
     """
-    # 1. 自动获取特征维度 (例如 37)
-    # 假设 targetclass[0].x 是 [nodes, features]
-    real_num_types = targetclass[0].x.shape[1]
+    if len(targetclass) == 0:
+        return np.zeros((N, 1)), np.zeros((N, N))
 
-    # 2. 初始化矩阵：列数需要 +1 (因为第0列预留给"节点不存在")
-    # X 的形状变为 [N, 37 + 1]
-    X = np.zeros((N, real_num_types + 1))
+    # 列：one-hot 维数取子集最大值（与同集内维数一致时与「只看首图」等价）
+    feat_dim = max(int(d.x.shape[1]) for d in targetclass)
+    num_cols = feat_dim + 1  # 第 0 列为空槽位，1..feat_dim 为类别
+
+    X = np.zeros((N, num_cols))
     Adj = np.zeros((N, N))
 
-    print(f"Detected {real_num_types} node types. X matrix shape: {X.shape}")
+    print(f"Detected feat_dim={feat_dim}, slot_rows N={N}. X matrix shape: {X.shape}")
     print(f"Processing {len(targetclass)} graphs...")
 
     # --- 统计节点分布 ---
     for i in range(len(targetclass)):
         data = targetclass[i]
 
-        # One-Hot -> Index (0 ~ 36)
         if data.x.shape[1] > 1:
             x_indices = torch.argmax(data.x, dim=1)
         else:
             x_indices = data.x.squeeze()
 
-        # 偏移索引：0 预留给"不存在"，所以原子类型变为 1 ~ 37
-        x_indices = x_indices + 1
+        x_indices = x_indices + 1  # 映射到列 1..feat_dim
 
-        # 统计
         current_num_nodes = len(x_indices)
-        for j in range(current_num_nodes):
-            type_idx = x_indices[j].item()
-            # 只要索引在合法范围内 (0 ~ 37)，都进行统计
-            if type_idx <= real_num_types:
+        # 行 j 表示「第 j 个槽位」：仅统计前 N 个节点，避免图节点数 > N 时 X[j] 行越界
+        slot_nodes = min(current_num_nodes, N)
+        for j in range(slot_nodes):
+            type_idx = int(x_indices[j].item())
+            if 0 <= type_idx < num_cols:
                 X[j][type_idx] += 1
 
-        # 填充不存在的节点 (Type 0)
-        for k in range(current_num_nodes, N):
+        # 槽位 slot_nodes..N-1 视为「该图在此位置无节点」
+        for k in range(slot_nodes, N):
             X[k][0] += 1
 
-            # --- 统计边分布 (保持不变) ---
+    # --- 统计边分布 ---
     for i in range(len(targetclass)):
         data = targetclass[i]
         adj = data.edge_index
@@ -281,7 +295,7 @@ def GraphRepModelDiscrete(targetclass, N=111):
     return X, Adj
 
 
-def graphsamplerDiscrete(N, X, Adj, threshold=0.1, num_node_features=37):
+def graphsamplerDiscrete(N, X, Adj, threshold=0.3, num_node_features=37, visualize=False):
     """
     Gen-GraphEx 生成器（通用适配版）
 
@@ -351,19 +365,19 @@ def graphsamplerDiscrete(N, X, Adj, threshold=0.1, num_node_features=37):
         G = G.subgraph(largest_cc_nodes).copy()
         G = nx.convert_node_labels_to_integers(G)
 
-    # 准备绘图标签
-    node_labels = {i: G.nodes[i].get('label_name', '?') for i in G.nodes()}
-
     # --- 6. 可视化 ---
-    plt.figure(figsize=(8, 8))
-    pos = nx.spring_layout(G, seed=42, k=0.5)
+    if visualize:
+        node_labels = {i: G.nodes[i].get('label_name', '?') for i in G.nodes()}
+        plt.figure(figsize=(8, 8))
+        pos = nx.spring_layout(G, seed=42, k=0.5)
 
-    nx.draw_networkx_nodes(G, pos, node_size=400, node_color='#ADD8E6', edgecolors='black')  # 换个颜色区分
-    nx.draw_networkx_edges(G, pos, edge_color='gray', width=1.5, alpha=0.7)
-    nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=10, font_family='sans-serif')
+        nx.draw_networkx_nodes(G, pos, node_size=400, node_color='#ADD8E6', edgecolors='black')
+        nx.draw_networkx_edges(G, pos, edge_color='gray', width=1.5, alpha=0.7)
+        nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=10, font_family='sans-serif')
 
-    plt.title(f"Generated Graph (Threshold={threshold})", fontsize=15)
-    plt.axis('off')
-    plt.show()
+        plt.title(f"Generated Graph (Threshold={threshold})", fontsize=15)
+        plt.axis('off')
+        plt.show()
+        plt.close()
 
     return G
