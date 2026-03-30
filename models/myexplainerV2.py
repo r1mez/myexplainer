@@ -90,7 +90,7 @@ class MyExplainerV2(nn.Module):
 
     # ================= 核心逻辑：Pipeline =================
 
-    def forward(self, graphs, subgraphs=None, use_subgraph_gt=True, max_cand_per_graph=30):
+    def forward(self, graphs, subgraphs=None, use_subgraph_gt=True, max_cand_per_graph=15):
         x, edge_index, batch = graphs.x, graphs.edge_index, graphs.batch
         N = x.size(0)
 
@@ -305,8 +305,8 @@ class MyExplainerV2(nn.Module):
         # 总损失聚合
         total_loss = (
                 getattr(args, "w_cf", 5.0) * cf_loss +
-                getattr(args, "w_l1_add", 1.0) * l1_add +
-                getattr(args, "w_l1_del", 0.1) * l1_del +
+                getattr(args, "w_l1_add", 10.0) * l1_add +
+                getattr(args, "w_l1_del", 0.5) * l1_del +
                 getattr(args, "w_vgae_recon", 5.0) * recon_loss +
                 getattr(args, "w_vgae_kl", 1.0) * kl_loss
         )

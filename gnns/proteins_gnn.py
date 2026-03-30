@@ -135,6 +135,7 @@ class PROTEINSGCN(torch.nn.Module):
         return probs, logits
 
     def get_pred_explain(self, x, edge_index, edge_mask, batch, mask_is_logit=False):
+        # print("edge_mask:", edge_mask)
         if mask_is_logit:
             edge_weight = (edge_mask * EPS).sigmoid()
         else:

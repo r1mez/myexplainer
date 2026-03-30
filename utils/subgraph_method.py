@@ -295,7 +295,7 @@ def GraphRepModelDiscrete(targetclass, N=111):
     return X, Adj
 
 
-def graphsamplerDiscrete(N, X, Adj, threshold=0.3, num_node_features=37, visualize=False):
+def graphsamplerDiscrete(N, X, Adj, threshold=0.5, num_node_features=3, visualize=False):
     """
     Gen-GraphEx 生成器（通用适配版）
 
