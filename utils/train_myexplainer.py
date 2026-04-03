@@ -7,12 +7,9 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
     # 记录损失历史
     losses = {
         'total': [],
-        'recon': [],
-        # 'mask': [],
-        # 'edit_inside': [],
-        # 'edit_outside': [],
         'cf': [],
-        'kl': [],
+        'sgfm_recon': [],
+        'sgfm_cycle': [],
         'val_total': []
     }
 
@@ -35,12 +32,9 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
         gnn.eval()
         epoch_losses = {
             'total': 0.0,
-            'recon': 0.0,
-            # 'mask': 0.0,
-            # 'edit_inside': 0.0,
-            # 'edit_outside': 0.0,
             'cf': 0.0,
-            'kl': 0.0,
+            'sgfm_recon': 0.0,
+            'sgfm_cycle': 0.0,
         }
 
         num_batches = 0
@@ -70,7 +64,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
             #     y_desired=y_desired.view(-1, 1),
             #     edge_attr=getattr(origraphs, 'edge_attr', None)
             # )
-            outputs = model(origraphs, subgraphs)
+            outputs = model(origraphs, subgraphs, y_desired=y_desired)
             loss_dict = model.compute_loss(args, origraphs, y_desired, outputs)
 
             if batch_idx in [0,1,2,3,4]:
@@ -108,19 +102,15 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
 
             # 9. 累积损失到epoch_losses
             total_loss = loss_dict["total"]
-            for key in loss_dict:
-                epoch_losses[key] += loss_dict[key].item()
+            for key in epoch_losses:
+                if key in loss_dict:
+                    epoch_losses[key] += loss_dict[key].item()
             num_batches += 1
 
             # 更新进度条
             progress_bar.set_postfix({
                 'loss': f'{total_loss.item():.4f}',
-                'recon': f'{loss_dict["recon"]:.4f}',
-                # 'mask': f'{loss_dict["mask"]:.4f}',
-                # 'edit_inside': f'{loss_dict["edit_inside"]:.4f}',
-                # 'edit_outside': f'{loss_dict["edit_outside"]:.4f}',
                 'cf': f'{loss_dict["cf"]:.4f}',
-                'kl': f'{loss_dict["kl"]:.4f}',
             })
 
         # 计算epoch平均损失
@@ -142,7 +132,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
                 ori_pred = ori_pred_logits.argmax(dim=1)
                 y_desired = (1 - ori_pred).float().unsqueeze(1)
 
-                outputs = model(origraphs, subgraphs)
+                outputs = model(origraphs, subgraphs, y_desired=y_desired)
                 loss_dict = model.compute_loss(args, origraphs, y_desired, outputs)
 
                 val_loss_accum += loss_dict["total"].item()
@@ -211,7 +201,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
     # plt.close()
 
     epochs_range = range(1, epochs + 1)
-    loss_types = ['total', 'recon', 'kl', 'cf','val_total']
+    loss_types = ['total', 'cf', 'sgfm_recon', 'sgfm_cycle', 'val_total']
 
     for loss_type in loss_types:
         plt.figure(figsize=(10, 6))

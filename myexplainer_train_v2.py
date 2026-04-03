@@ -29,7 +29,7 @@ def parse_args():
 
     # 基础设置
     parser.add_argument('--cuda', type=int, default=2, help='GPU device')
-    parser.add_argument('--dataset', type=str, default='proteins', help='Dataset name')
+    parser.add_argument('--dataset', type=str, default='nci1', help='Dataset name')
     parser.add_argument('--gnn_path', type=str, default='param/', help='GNN directory')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use (cpu or cuda)')
     parser.add_argument('--train_mode',type=bool,default=True,help='Current mode')
@@ -52,10 +52,24 @@ def parse_args():
 
     # 训练参数
     parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
 
     parser.add_argument('--subgraph_method',type=str,default='genGraphEx',help='Subgraph method')
+
+    # SGFM 超参数（默认偏快；整 batch×dopri5×全图 GNN 极易极慢）
+    parser.add_argument('--sgfm_opt_steps', type=int, default=1, help='SGFM 内循环寻优步数（大可提精度但成倍耗时）')
+    parser.add_argument('--sgfm_lr', type=float, default=0.01, help='SGFM 内循环学习率')
+    parser.add_argument('--sgfm_ode_method', type=str, default='euler', choices=['euler', 'dopri5'],
+                        help='隐空间 ODE：euler 快，dopri5 慢但更精细')
+    parser.add_argument('--sgfm_ode_n_steps', type=int, default=3, help='euler 积分步数（仅 method=euler 时有效）')
+    parser.add_argument('--lambda_cf', type=float, default=10.0, help='SGFM 反事实分类损失权重')
+    parser.add_argument('--lambda_dist', type=float, default=1.0, help='SGFM 隐空间距离约束权重')
+
+    # SGFM 结构损失权重（子图编解码与 ODE 端到端）
+    parser.add_argument('--w_sgfm_recon', type=float, default=1.0, help='子图邻接重构 BCE 权重')
+    parser.add_argument('--w_sgfm_cycle', type=float, default=0.5, help='ODE 往返一致性 MSE 权重')
+    parser.add_argument('--sgfm_vf_hidden', type=int, default=128, help='向量场 MLP 隐层宽度')
 
     return parser.parse_args()
 
@@ -137,6 +151,9 @@ def main():
     )
     print(f"  Batch size: {args.batch_size}")
     print(f"  Total batches: {len(train_loader_masked)}")
+
+    # 子图编解码与向量场已内建于 MyExplainerV2，与 Explainer 联合训练
+    print("\n6. Subgraph encoder/decoder and flow field are trainable inside MyExplainerV2.")
 
     if args.train_mode:
         # 初始化模型

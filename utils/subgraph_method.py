@@ -30,10 +30,10 @@ def subgraph_mining(args,datasets):
                 patterns_1.append(graphsamplerDiscrete(417,X, Adj))
         if args.dataset == 'nci1':
             X, Adj = GraphRepModelDiscrete(datasets[0],111)
-            for i in range(100):
+            for i in range(10000):
                 patterns_0.append(graphsamplerDiscrete(111,X, Adj))
             X, Adj = GraphRepModelDiscrete(datasets[1],111)
-            for i in range(100):
+            for i in range(10000):
                 patterns_1.append(graphsamplerDiscrete(111,X, Adj))
         if args.dataset == 'proteins':
             # 槽位行数 N 须 ≥ 该类内最大节点数，否则 X[j] 行越界（PROTEINS 常有图 >75 节点）
@@ -295,7 +295,7 @@ def GraphRepModelDiscrete(targetclass, N=111):
     return X, Adj
 
 
-def graphsamplerDiscrete(N, X, Adj, threshold=0.5, num_node_features=3, visualize=False):
+def graphsamplerDiscrete(N, X, Adj, threshold=0.1, num_node_features=37, visualize=True):
     """
     Gen-GraphEx 生成器（通用适配版）
 
