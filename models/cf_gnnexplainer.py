@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import time
 import torch
@@ -17,6 +18,9 @@ from utils.baseline_eval_metrics import (
     compute_sparsity_from_edge_index,
     OracleWrappedModel,
 )
+
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 
 def vector_to_symm_matrix(
 	vector: torch.Tensor, n_rows: int, n_rows_pad: int = 0, offset:int = -1
@@ -530,7 +534,7 @@ def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
 	}
 
 if __name__ == "__main__":
-	dataset_name = 'mutag'
+	dataset_name = os.environ.get("MYEXPLAINER_DATASET", "fluoride_carbonyl")
 	device = 'cuda:2'
 
 	print("\n1. Loading datasets...")
@@ -538,7 +542,8 @@ if __name__ == "__main__":
 	print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
 
 	print("\n2. Loading pre-trained GNN classifier...")
-	gnn = torch.load(f'param/gnns/{dataset_name}_gcn.pt', map_location=device)
+	gnn_path = os.path.join(PROJECT_ROOT, 'param', 'gnns', f'{dataset_name}_gcn.pt')
+	gnn = torch.load(gnn_path, map_location=device)
 	gnn.eval()
 	print("  GNN loaded successfully")
 

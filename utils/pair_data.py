@@ -19,7 +19,7 @@ from tqdm import tqdm
 import igraph as ig
 
 class MappedDataset(Dataset):
-    def __init__(self, args, dataset, patterns, pred_labels = None, pred_probs = None, gnn = None):
+    def __init__(self, args, dataset, patterns, pred_labels = None, pred_probs = None, gnn = None, split_name="dataset"):
         """
         初始化GraphTrainData数据集
 
@@ -39,8 +39,12 @@ class MappedDataset(Dataset):
         self.probs = pred_probs  # 存储GNN预测的概率
         self.sub_masks = []  # 预计算的频繁子图掩码
         self.dataset_name = args.dataset
+        self.split_name = split_name
         self.thresh = args.threshold
         self.args = args
+        self.match_success_flags = []
+        self.match_success_count = 0
+        self.match_success_ratio = 0.0
         if self.labels is None and self.probs is None:
             self._predict_label(args, dataset, gnn)
         # 预处理：从dataloader中提取所有图并进行预测
@@ -53,6 +57,11 @@ class MappedDataset(Dataset):
         print(f"  length of sub_masks: {len(self.sub_masks)}")
         print(f"  length of graphs: {len(self.graphs)}")
         print(f"  length of subgraphs: {len(self.subgraphs)}")
+        print(
+            f"  Subgraph matching success rate ({self.split_name}): "
+            f"{self.match_success_count}/{len(self.graphs)} "
+            f"({self.match_success_ratio:.2%})"
+        )
 
     def _process_graphs(self, dataset):
         for data in dataset:
@@ -81,7 +90,8 @@ class MappedDataset(Dataset):
                 patterns = self.patterns_1
 
             graph_nx = to_networkx(graph, node_attrs=['x']).to_undirected()
-            subgraph_nx = self._find_largest_subgraph(graph_nx, patterns)
+            subgraph_nx, is_matched = self._find_largest_subgraph(graph_nx, patterns)
+            self.match_success_flags.append(is_matched)
 
 
             subgraph = from_networkx(subgraph_nx)
@@ -89,6 +99,10 @@ class MappedDataset(Dataset):
 
             subgraph.node_mappings = torch.tensor(node_mappings)
             self.subgraphs.append(subgraph)
+
+        self.match_success_count = sum(self.match_success_flags)
+        if self.graphs:
+            self.match_success_ratio = self.match_success_count / len(self.graphs)
 
     def _graph_padding(self, num_nodes, graphs):
         padded_graphs = []
@@ -149,14 +163,14 @@ class MappedDataset(Dataset):
 
         # 4. 如果一个 pattern 都没匹配上，就退回原图
         if best_match_vertices is None:
-            return graph_nx
+            return graph_nx, False
 
         # 5. 把 igraph 的顶点 id 映射回原来 networkx 的 node id
         matched_nodes = [g_ig.vs[v]["orig_id"] for v in best_match_vertices]
 
         # 6. 用这些 node id 从 graph_nx 里抽子图，保持原有属性
         subgraph = graph_nx.subgraph(matched_nodes).copy()
-        return subgraph
+        return subgraph, True
 
     def _predict_label(self, args, dataset, model):
         """使用预训练GNN模型预测图的标签和概率"""

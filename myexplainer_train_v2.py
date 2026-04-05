@@ -29,7 +29,7 @@ def parse_args():
 
     # 基础设置
     parser.add_argument('--cuda', type=int, default=2, help='GPU device')
-    parser.add_argument('--dataset', type=str, default='proteins', help='Dataset name')
+    parser.add_argument('--dataset', type=str, default='fluoride_carbonyl', help='Dataset name')
     parser.add_argument('--gnn_path', type=str, default='param/', help='GNN directory')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use (cpu or cuda)')
     parser.add_argument('--train_mode',type=bool,default=True,help='Current mode')
@@ -112,9 +112,15 @@ def main():
 
     print("\n4. Creating dataset with subgraph masks...")
 
-    train_dataset_with_masks = MappedDataset(args, train_dataset, patterns, pred_labels, pred_probs)
-    test_dataset_with_masks = MappedDataset(args, test_dataset, patterns,gnn=gnn)
-    val_dataset_with_masks = MappedDataset(args, val_dataset, patterns,gnn=gnn)
+    train_dataset_with_masks = MappedDataset(
+        args, train_dataset, patterns, pred_labels, pred_probs, split_name="train"
+    )
+    test_dataset_with_masks = MappedDataset(
+        args, test_dataset, patterns, gnn=gnn, split_name="test"
+    )
+    val_dataset_with_masks = MappedDataset(
+        args, val_dataset, patterns, gnn=gnn, split_name="val"
+    )
 
     print("\n5. Creating masked data loader...")
     train_loader_masked = TorchDataLoader(

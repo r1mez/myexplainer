@@ -8,6 +8,47 @@ import torch
 from torch.distributions import Categorical
 
 
+def _sample_discrete_patterns(class_zero_dataset, class_one_dataset, num_samples):
+    patterns_0 = []
+    patterns_1 = []
+
+    if len(class_zero_dataset) == 0 or len(class_one_dataset) == 0:
+        return patterns_0, patterns_1
+
+    feature_dim = max(
+        max((int(d.x.shape[1]) for d in class_zero_dataset), default=1),
+        max((int(d.x.shape[1]) for d in class_one_dataset), default=1),
+    )
+    max_nodes_0 = max((int(d.num_nodes) for d in class_zero_dataset), default=1)
+    max_nodes_1 = max((int(d.num_nodes) for d in class_one_dataset), default=1)
+
+    X, Adj = GraphRepModelDiscrete(class_zero_dataset, max_nodes_0)
+    for _ in range(num_samples):
+        patterns_0.append(
+            graphsamplerDiscrete(
+                max_nodes_0,
+                X,
+                Adj,
+                num_node_features=feature_dim,
+                visualize=True,
+            )
+        )
+
+    X, Adj = GraphRepModelDiscrete(class_one_dataset, max_nodes_1)
+    for _ in range(num_samples):
+        patterns_1.append(
+            graphsamplerDiscrete(
+                max_nodes_1,
+                X,
+                Adj,
+                num_node_features=feature_dim,
+                visualize=True,
+            )
+        )
+
+    return patterns_0, patterns_1
+
+
 def subgraph_mining(args,datasets):
     if args.subgraph_method == 'genGraphEx':
         patterns_0 = []
@@ -20,22 +61,15 @@ def subgraph_mining(args,datasets):
             Bdist, mean_estimate, result, Adj = GraphRepModel(datasets[1],25)
             for i in range(50):
                 patterns_1.append(graphsampler(25,Bdist, mean_estimate, result, Adj))
-        # mutag 417, nci1 111
-        if args.dataset == 'mutag':
-            X, Adj = GraphRepModelDiscrete(datasets[0],417)
-            for i in range(100):
-                patterns_0.append(graphsamplerDiscrete(417,X, Adj))
-            X, Adj = GraphRepModelDiscrete(datasets[1],417)
-            for i in range(100):
-                patterns_1.append(graphsamplerDiscrete(417,X, Adj))
+        if args.dataset in {'mutag', 'proteins', 'alkane_carbonyl', 'fluoride_carbonyl'}:
+            patterns_0, patterns_1 = _sample_discrete_patterns(
+                datasets[0], datasets[1], num_samples=100
+            )
         if args.dataset == 'nci1':
-            X, Adj = GraphRepModelDiscrete(datasets[0],111)
-            for i in range(100):
-                patterns_0.append(graphsamplerDiscrete(111,X, Adj))
-            X, Adj = GraphRepModelDiscrete(datasets[1],111)
-            for i in range(100):
-                patterns_1.append(graphsamplerDiscrete(111,X, Adj))
-        if args.dataset == 'proteins':
+            patterns_0, patterns_1 = _sample_discrete_patterns(
+                datasets[0], datasets[1], num_samples=10000
+            )
+        if args.dataset == '__legacy_proteins_branch__':
             # 槽位行数 N 须 ≥ 该类内最大节点数，否则 X[j] 行越界（PROTEINS 常有图 >75 节点）
             nf0 = max((int(d.x.shape[1]) for d in datasets[0]), default=1)
             nf1 = max((int(d.x.shape[1]) for d in datasets[1]), default=1)
@@ -135,7 +169,7 @@ def GraphRepModel(classdata,N):
     Adj=Adj/numgraphs
     return Bdist, mean_estimate, result, Adj
 
-def graphsampler(N, Bdist, mean_estimate, result, Adj, threshold=0.97, visualize=False):
+def graphsampler(N, Bdist, mean_estimate, result, Adj, threshold=0.97, visualize=True):
     """
     Gen-GraphEx 生成器（集成阈值过滤版）
 
@@ -295,7 +329,7 @@ def GraphRepModelDiscrete(targetclass, N=111):
     return X, Adj
 
 
-def graphsamplerDiscrete(N, X, Adj, threshold=0.5, num_node_features=3, visualize=False):
+def graphsamplerDiscrete(N, X, Adj, threshold=0.9, num_node_features=37, visualize=False):
     """
     Gen-GraphEx 生成器（通用适配版）
 
@@ -353,10 +387,15 @@ def graphsamplerDiscrete(N, X, Adj, threshold=0.5, num_node_features=3, visualiz
             # 既然没有原子映射表，直接显示类型ID
             label_text = f"{feat_idx}"
         else:
-            label_text = "?"
+            raise ValueError(
+                f"Sampled node feature index {feat_idx} is out of range for "
+                f"num_node_features={num_node_features}"
+            )
 
-        G.nodes[i]['type'] = type_idx
+        G.nodes[i]['type'] = feat_idx
         G.nodes[i]['x'] = one_hot
+        if 0 <= feat_idx < num_node_features and int(np.argmax(one_hot)) != G.nodes[i]['type']:
+            raise AssertionError("Pattern node type must match argmax(node['x'])")
         G.nodes[i]['label_name'] = label_text  # 存入临时属性
 
     # 保留最大连通子图

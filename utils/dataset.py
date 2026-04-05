@@ -2,10 +2,22 @@ import os
 
 from datasets import Mutagenicity
 from datasets import NCI1
+from datasets import AlkaneCarbonyl
+from datasets import FluorideCarbonyl
 from datasets import bbbp
 from datasets import BA2Motif
 from datasets import Benzene
 from datasets import PROTEINS
+
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+
+
+def _resolve_dataset_root(root):
+    if os.path.isabs(root):
+        return root
+    return os.path.abspath(os.path.join(PROJECT_ROOT, root))
+
 
 def get_datasets(name, root="data/"):
     """
@@ -14,6 +26,8 @@ def get_datasets(name, root="data/"):
     :param root: root path of the dataset
     :return: train_dataset, test_dataset, val_dataset
     """
+    root = _resolve_dataset_root(root)
+    print("Loading dataset: ", name)
     if name == "mutag":
         folder = os.path.join(root, "mutag")
         train_dataset = Mutagenicity(folder, mode="training")
@@ -40,6 +54,16 @@ def get_datasets(name, root="data/"):
         train_dataset = Benzene(folder, mode="training")
         test_dataset = Benzene(folder, mode="testing")
         val_dataset = Benzene(folder, mode="evaluation")
+    elif name == "alkane_carbonyl":
+        folder = os.path.join(root, "alkane_carbonyl")
+        train_dataset = AlkaneCarbonyl(folder, mode="training")
+        test_dataset = AlkaneCarbonyl(folder, mode="testing")
+        val_dataset = AlkaneCarbonyl(folder, mode="evaluation")
+    elif name == "fluoride_carbonyl":
+        folder = os.path.join(root, "fluoride_carbonyl")
+        train_dataset = FluorideCarbonyl(folder, mode="training")
+        test_dataset = FluorideCarbonyl(folder, mode="testing")
+        val_dataset = FluorideCarbonyl(folder, mode="evaluation")
     elif name == "proteins":
         folder = os.path.join(root, "proteins")
         train_dataset = PROTEINS(folder, mode="training")
