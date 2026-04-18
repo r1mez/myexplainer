@@ -4,6 +4,7 @@ import random
 import numpy as np
 import torch
 import torch.optim as optim
+from torch_geometric.data import Batch, Data
 from torch.utils.data import DataLoader as TorchDataLoader
 from torch_geometric.loader import DataLoader
 
@@ -24,12 +25,85 @@ def set_seed(seed):
     np.random.seed(seed)
 set_seed(42)
 
+
+def pattern_nx_to_data(pattern_nx, x_dim):
+    if pattern_nx is None or pattern_nx.number_of_nodes() == 0:
+        return None
+
+    node_list = list(pattern_nx.nodes())
+    num_nodes = len(node_list)
+    node_mapping = {node_id: idx for idx, node_id in enumerate(node_list)}
+
+    x_rows = []
+    for node_id in node_list:
+        node_attrs = pattern_nx.nodes[node_id]
+        feat = node_attrs.get("x")
+        if feat is not None:
+            feat = torch.as_tensor(feat, dtype=torch.float).view(-1)
+        else:
+            feat_idx = node_attrs.get("feature", node_attrs.get("type"))
+            if feat_idx is None:
+                return None
+            feat = torch.zeros(x_dim, dtype=torch.float)
+            feat_idx = int(feat_idx)
+            if feat_idx < 0 or feat_idx >= x_dim:
+                return None
+            feat[feat_idx] = 1.0
+
+        if feat.numel() != x_dim:
+            return None
+        x_rows.append(feat)
+
+    if not x_rows:
+        return None
+
+    x = torch.stack(x_rows, dim=0)
+
+    if x.size(-1) != x_dim:
+        return None
+
+    edges = []
+    for src, dst in pattern_nx.edges():
+        src_idx = node_mapping[src]
+        dst_idx = node_mapping[dst]
+        edges.append((src_idx, dst_idx))
+        edges.append((dst_idx, src_idx))
+
+    if edges:
+        edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    else:
+        edge_index = torch.empty((2, 0), dtype=torch.long)
+
+    return Data(x=x, edge_index=edge_index, num_nodes=num_nodes)
+
+
+def build_prototype_bank(patterns, x_dim, topk):
+    prototype_bank = {}
+    prototype_counts = {}
+
+    if isinstance(patterns, dict):
+        pattern_items = patterns.items()
+    else:
+        pattern_items = enumerate(patterns)
+
+    for class_idx, class_patterns in pattern_items:
+        valid_graphs = []
+        for pattern_nx in class_patterns[:topk]:
+            data = pattern_nx_to_data(pattern_nx, x_dim)
+            if data is not None:
+                valid_graphs.append(data)
+
+        prototype_counts[int(class_idx)] = len(valid_graphs)
+        prototype_bank[int(class_idx)] = Batch.from_data_list(valid_graphs) if valid_graphs else None
+
+    return prototype_bank, prototype_counts
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Train MyExplainer model')
 
     # 基础设置
-    parser.add_argument('--cuda', type=int, default=2, help='GPU device')
-    parser.add_argument('--dataset', type=str, default='fluoride_carbonyl', help='Dataset name')
+    parser.add_argument('--cuda', type=int, default=0, help='GPU device')
+    parser.add_argument('--dataset', type=str, default='ba2motif', help='Dataset name')
     parser.add_argument('--gnn_path', type=str, default='param/', help='GNN directory')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use (cpu or cuda)')
     parser.add_argument('--train_mode',type=bool,default=True,help='Current mode')
@@ -51,9 +125,12 @@ def parse_args():
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
 
     # 训练参数
-    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
+    parser.add_argument('--w_proto', type=float, default=1.0, help='Prototype alignment loss weight')
+    parser.add_argument('--proto_topk', type=int, default=100, help='Top-K frequent patterns per class for prototypes')
+    parser.add_argument('--proto_refresh_every', type=int, default=5, help='Refresh prototypes every N epochs')
 
     parser.add_argument('--subgraph_method',type=str,default='genGraphEx',help='Subgraph method')
 
@@ -72,6 +149,7 @@ def main():
     train_dataset, val_dataset, test_dataset = get_datasets(name=args.dataset.lower())
     args.x_dim = train_dataset[0].x.shape[1]
     args.edge_attr_dim = train_dataset[0].edge_attr.shape[1] if train_dataset[0].edge_attr is not None else 0
+    args.num_classes = 2
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
 
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=False)
@@ -107,6 +185,9 @@ def main():
     # 加载子图模式
     # 如果fsm_results/args.dataset_patterns.pkl不存在，则运行FSMiner进行挖掘,否则直接加载
     patterns = subgraph_mining(args,splited_train_dataset)
+    prototype_bank, prototype_counts = build_prototype_bank(patterns, args.x_dim, args.proto_topk)
+    for class_idx, count in prototype_counts.items():
+        print(f"  Prototype graphs for class {class_idx}: {count}")
 
 
 
@@ -181,6 +262,7 @@ def main():
             eval_loader=val_loader_masked,
             optimizer=optimizer,
             scheduler=scheduler,
+            prototype_bank=prototype_bank,
             epochs=args.epochs
         )
         print("\n" + "=" * 80)
@@ -190,7 +272,11 @@ def main():
         print("\n8. Loading Trained MyExplainer...")
         print("=" * 80)
         trained_model = MyExplainerV2(args, gnn).to(args.device)
-        trained_model.load_state_dict(torch.load(f'param/myexplainer_{args.dataset.lower()}_best.pt', map_location=args.device))
+        trained_model.load_state_dict(
+            torch.load(f'param/myexplainer_{args.dataset.lower()}_best.pt', map_location=args.device),
+            strict=False
+        )
+        trained_model.refresh_class_prototypes(prototype_bank)
         trained_model.eval()
         for p in trained_model.parameters():
             p.requires_grad_(False)
@@ -243,6 +329,19 @@ def main():
             evaluation_metrics["sparsity"]
         )
     )
+
+    per_class_flip = evaluation_metrics.get("per_class_flip", {})
+    for class_idx in [0, 1]:
+        class_metrics = per_class_flip.get(class_idx, {})
+        print(
+            "  Class {} Flip Success -> {:.4f} (successful: {}/total: {}, target: {})".format(
+                class_idx,
+                class_metrics.get("ratio", 0.0),
+                int(class_metrics.get("successful", 0)),
+                int(class_metrics.get("total", 0)),
+                1 - class_idx,
+            )
+        )
 
     print("\n" + "=" * 80)
     print("Training completed successfully!")

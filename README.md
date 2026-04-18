@@ -64,6 +64,7 @@ Evaluation Metrics
 │   ├── c2explainer.py            # baseline / 对比方法相关实现
 │   ├── cf_gnnexplainer.py        # baseline / 对比方法相关实现
 │   ├── clear.py                  # baseline / 对比方法相关实现
+│   ├── rsgg_ce.py                # baseline / GRETEL-RSGG-CE 适配实现
 │   └── graph_conv.py             # 图卷积相关组件
 ├── gnns/                         # 被解释的 GNN 分类器结构
 ├── datasets/                     # 各数据集的 PyTorch Geometric 封装
@@ -305,6 +306,7 @@ Evaluation Results on Validation Set:
 
 - `myexplainer_train_v2.py`：主训练和评估入口。
 - `models/myexplainerV2.py`：CCFGExplainer 的核心模型实现，包括图编码、边删除、候选边添加和 prototype loss。
+- `models/rsgg_ce.py`：基于 GRETEL 官方实现思路改写的 RSGG-CE baseline，提供训练、加载和评估接口。
 - `utils/subgraph_method.py`：基于类别数据生成频繁子图 pattern。
 - `utils/pair_data.py`：将 pattern 匹配回每张图，构造训练需要的 graph-subgraph batch。
 - `utils/train_myexplainer.py`：训练循环、验证损失、checkpoint 保存。

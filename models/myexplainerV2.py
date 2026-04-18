@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch_scatter
 from torch import Tensor
 from torch.nn import Parameter
+from torch_geometric.data import Batch
 from torch_geometric.nn.dense.linear import Linear
 from torch_geometric.nn.dense import dense_diff_pool
 from torch_geometric.nn import DenseGCNConv, GCNConv, GATConv, global_mean_pool, global_max_pool, global_add_pool
@@ -70,7 +71,7 @@ class AddVGAENet(nn.Module):
         z = self.reparameterize(mu, logvar)
         logits = torch.matmul(z, z.t())
         prob_adj = torch.sigmoid(logits)
-        return prob_adj, mu, logvar
+        return prob_adj, logits, mu, logvar
 
 
 class MyExplainerV2(nn.Module):
@@ -79,6 +80,7 @@ class MyExplainerV2(nn.Module):
         self.args = args
         self.gnn = gnn
         self.device = args.device
+        self.num_proto_classes = getattr(args, "num_classes", 2)
 
         # 1. Graph Encoder
         self.conv1 = GCNConv(args.x_dim, args.h_dim)
@@ -87,6 +89,8 @@ class MyExplainerV2(nn.Module):
         # 2. Functional Modules
         self.delete_net = DeleteNet(args.h_dim)
         self.add_net = AddVGAENet(args.h_dim, args.z_dim)
+        self.register_buffer("class_prototypes", torch.zeros(self.num_proto_classes, args.h_dim))
+        self.register_buffer("prototype_available", torch.zeros(self.num_proto_classes, dtype=torch.bool))
 
     # ================= 核心逻辑：Pipeline =================
 
@@ -100,10 +104,10 @@ class MyExplainerV2(nn.Module):
         # Step 2: Determine Candidate Region (FS Nodes)
         fs_nodes_bool = self._get_fs_mask(batch, subgraphs, N, use_subgraph_gt)
 
-        # Step 3: Delete Logic (Predict p_keep for existing edges)
+        # Step 3: DeleteNet manages edge deletion over all original edges.
         p_keep, logit_keep = self.delete_net(node_rep, edge_index)
 
-        # Step 4: Add Logic (VGAE inside FS nodes)
+        # Step 4: AddVGAE only manages candidate additions inside FS.
         add_results = self._sample_add_candidates(
             node_rep, edge_index, batch, fs_nodes_bool, max_cand_per_graph
         )
@@ -112,6 +116,13 @@ class MyExplainerV2(nn.Module):
         # Step 5: Construct CF Graph
         edge_index_cf, edge_weight_cf = self._build_cf_graph(
             edge_index, p_keep, cand_src, cand_dst, p_add
+        )
+        cf_fs_embed, cf_fs_graph_ids = self._encode_reconstructed_fs_subgraphs(
+            x,
+            batch,
+            fs_nodes_bool,
+            edge_index_cf,
+            edge_weight_cf,
         )
 
         return {
@@ -126,14 +137,22 @@ class MyExplainerV2(nn.Module):
             "add_kl_loss": add_results['kl_loss'],
             "edge_index_cf": edge_index_cf,
             "edge_weight_cf": edge_weight_cf,
+            "cf_fs_embed": cf_fs_embed,
+            "cf_fs_graph_ids": cf_fs_graph_ids,
         }
 
     # ================= 辅助函数：具体的实现细节 =================
 
-    def _encode_graph(self, x, edge_index):
-        h = F.relu(self.conv1(x, edge_index))
-        h = F.relu(self.conv2(h, edge_index))
+    def _encode_graph(self, x, edge_index, edge_weight=None):
+        h = F.relu(self.conv1(x, edge_index, edge_weight=edge_weight))
+        h = F.relu(self.conv2(h, edge_index, edge_weight=edge_weight))
         return h
+
+    def _encode_graph_embedding(self, x, edge_index, batch, edge_weight=None):
+        if x.numel() == 0:
+            return torch.empty((0, self.args.h_dim), device=x.device)
+        node_rep = self._encode_graph(x, edge_index, edge_weight=edge_weight)
+        return global_mean_pool(node_rep, batch)
 
     def _get_fs_mask(self, batch, subgraphs, N, use_subgraph_gt):
         """获取频繁子图节点的 bool mask"""
@@ -157,7 +176,128 @@ class MyExplainerV2(nn.Module):
 
         return fs_nodes_bool
 
-    def _sample_add_candidates(self, node_rep, edge_index, batch, fs_nodes_bool, max_cand):
+    def _get_prototype_graphs_for_class(self, prototype_bank, class_idx):
+        if prototype_bank is None:
+            return None
+        if isinstance(prototype_bank, dict):
+            return prototype_bank.get(class_idx)
+        if isinstance(prototype_bank, (list, tuple)):
+            if 0 <= class_idx < len(prototype_bank):
+                return prototype_bank[class_idx]
+            return None
+        return None
+
+    def refresh_class_prototypes(self, prototype_bank):
+        prototype_values = torch.zeros_like(self.class_prototypes)
+        availability = torch.zeros_like(self.prototype_available)
+
+        if prototype_bank is None:
+            self.class_prototypes.copy_(prototype_values)
+            self.prototype_available.copy_(availability)
+            return
+
+        was_training = self.training
+        self.eval()
+        with torch.no_grad():
+            for class_idx in range(self.num_proto_classes):
+                class_graphs = self._get_prototype_graphs_for_class(prototype_bank, class_idx)
+                if class_graphs is None:
+                    continue
+
+                if isinstance(class_graphs, list):
+                    if len(class_graphs) == 0:
+                        continue
+                    class_batch = Batch.from_data_list(class_graphs).to(self.device)
+                elif isinstance(class_graphs, Batch):
+                    class_batch = class_graphs.to(self.device)
+                else:
+                    class_batch = Batch.from_data_list([class_graphs]).to(self.device)
+
+                if not hasattr(class_batch, "x") or class_batch.x is None or class_batch.x.numel() == 0:
+                    continue
+
+                class_embed = self._encode_graph_embedding(
+                    class_batch.x.float(),
+                    class_batch.edge_index,
+                    class_batch.batch,
+                )
+                if class_embed.numel() == 0:
+                    continue
+
+                prototype_values[class_idx] = class_embed.mean(dim=0)
+                availability[class_idx] = True
+
+        if was_training:
+            self.train()
+
+        self.class_prototypes.copy_(prototype_values)
+        self.prototype_available.copy_(availability)
+
+    def _encode_reconstructed_fs_subgraphs(self, x, batch, fs_nodes_bool, edge_index_cf, edge_weight_cf):
+        if edge_index_cf is None or edge_weight_cf is None:
+            return None, None
+
+        device = x.device
+        B = int(batch.max().item()) + 1 if batch.numel() > 0 else 0
+        if B == 0:
+            return None, None
+
+        x_parts, batch_parts = [], []
+        edge_index_parts, edge_weight_parts = [], []
+        graph_ids = []
+        node_offset = 0
+        N = x.size(0)
+
+        for g in range(B):
+            idx_g = (batch == g).nonzero(as_tuple=False).view(-1)
+            fs_idx_g = idx_g[fs_nodes_bool[idx_g]]
+            if fs_idx_g.numel() <= 1:
+                continue
+
+            global_to_local = torch.full((N,), -1, dtype=torch.long, device=device)
+            global_to_local[fs_idx_g] = torch.arange(fs_idx_g.size(0), device=device)
+
+            x_parts.append(x[fs_idx_g])
+            batch_parts.append(torch.full((fs_idx_g.size(0),), len(graph_ids), dtype=torch.long, device=device))
+            graph_ids.append(g)
+
+            cf_src, cf_dst = edge_index_cf
+            edge_mask_g = (
+                (batch[cf_src] == g) &
+                (batch[cf_dst] == g) &
+                fs_nodes_bool[cf_src] &
+                fs_nodes_bool[cf_dst]
+            )
+
+            if edge_mask_g.any():
+                src_local = global_to_local[cf_src[edge_mask_g]] + node_offset
+                dst_local = global_to_local[cf_dst[edge_mask_g]] + node_offset
+                edge_index_parts.append(torch.stack([src_local, dst_local], dim=0))
+                edge_weight_parts.append(edge_weight_cf[edge_mask_g])
+            else:
+                edge_index_parts.append(torch.empty((2, 0), dtype=torch.long, device=device))
+                edge_weight_parts.append(torch.empty((0,), dtype=x.dtype, device=device))
+
+            node_offset += fs_idx_g.size(0)
+
+        if not graph_ids:
+            return None, None
+
+        x_fs = torch.cat(x_parts, dim=0).float()
+        batch_fs = torch.cat(batch_parts, dim=0)
+        edge_index_fs = torch.cat(edge_index_parts, dim=1)
+        edge_weight_fs = torch.cat(edge_weight_parts, dim=0)
+
+        fs_embed = self._encode_graph_embedding(
+            x_fs,
+            edge_index_fs,
+            batch_fs,
+            edge_weight=edge_weight_fs if edge_weight_fs.numel() > 0 else None,
+        )
+        graph_ids = torch.tensor(graph_ids, dtype=torch.long, device=device)
+        return fs_embed, graph_ids
+
+    def _sample_add_candidates_legacy(self, node_rep, edge_index, batch, fs_nodes_bool, max_cand):
         """
         运行 VGAE 并根据策略筛选候选边
         """
@@ -186,7 +326,7 @@ class MyExplainerV2(nn.Module):
             A_g = adj_global[fs_idx_g][:, fs_idx_g]  # 子邻接矩阵
 
             # 2. VGAE Forward
-            prob_A, mu, logvar = self.add_net(h_g)
+            prob_A, _, mu, logvar = self.add_net(h_g)
 
             # 3. 计算 Loss (Recon + KL)
             recon_loss_g = self._compute_vgae_recon_loss(prob_A, A_g)
@@ -224,6 +364,11 @@ class MyExplainerV2(nn.Module):
             'recon_loss': torch.stack(recon_losses).mean() if recon_losses else torch.tensor(0.0, device=device),
             'kl_loss': torch.stack(kl_losses).mean() if kl_losses else torch.tensor(0.0, device=device)
         }
+
+    def _sample_add_candidates(self, node_rep, edge_index, batch, fs_nodes_bool, max_cand):
+        return self._sample_add_candidates_legacy(
+            node_rep, edge_index, batch, fs_nodes_bool, max_cand
+        )
 
     def _compute_vgae_recon_loss(self, prob_A, target_A):
         """加权二元交叉熵重构损失"""
@@ -270,7 +415,7 @@ class MyExplainerV2(nn.Module):
 
             return valid_indices
 
-    def _build_cf_graph(self, edge_index, p_keep, cand_src, cand_dst, p_add):
+    def _build_cf_graph_legacy(self, edge_index, p_keep, cand_src, cand_dst, p_add):
         """组合原有边和新增边，构建 CF 图"""
         if cand_src is None or p_add is None:
             return edge_index, p_keep
@@ -283,6 +428,36 @@ class MyExplainerV2(nn.Module):
         return edge_index_cf, edge_weight_cf
 
     # ================= Loss 计算 =================
+
+    def _build_cf_graph(self, edge_index, p_keep, cand_src, cand_dst, p_add):
+        return self._build_cf_graph_legacy(edge_index, p_keep, cand_src, cand_dst, p_add)
+
+    # ================= Loss 璁＄畻 =================
+    def _compute_proto_loss(self, outputs, y_target):
+        cf_fs_embed = outputs.get("cf_fs_embed")
+        cf_fs_graph_ids = outputs.get("cf_fs_graph_ids")
+        if cf_fs_embed is None or cf_fs_graph_ids is None or cf_fs_embed.numel() == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        target_classes = y_target[cf_fs_graph_ids]
+        in_range = (target_classes >= 0) & (target_classes < self.num_proto_classes)
+        if in_range.sum() == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        cf_fs_embed = cf_fs_embed[in_range]
+        target_classes = target_classes[in_range]
+        available = self.prototype_available[target_classes]
+        if available.sum() == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        cf_fs_embed = cf_fs_embed[available]
+        target_classes = target_classes[available]
+        target_proto = self.class_prototypes[target_classes].detach()
+
+        cf_fs_embed = F.normalize(cf_fs_embed, p=2, dim=-1)
+        target_proto = F.normalize(target_proto, p=2, dim=-1)
+        cosine = (cf_fs_embed * target_proto).sum(dim=-1)
+        return (1 - cosine).mean()
 
     def compute_loss(self, args, graphs, y_desired, outputs):
         # 提取变量，使公式更干净
@@ -301,14 +476,16 @@ class MyExplainerV2(nn.Module):
         # 3. VGAE Structure Loss
         recon_loss = outputs["add_recon_loss"]
         kl_loss = outputs["add_kl_loss"]
+        proto_loss = self._compute_proto_loss(outputs, y_target)
 
         # 总损失聚合
         total_loss = (
                 getattr(args, "w_cf", 10.0) * cf_loss +
                 getattr(args, "w_l1_add", 10.0) * l1_add +
-                getattr(args, "w_l1_del", 0.5) * l1_del +
+                getattr(args, "w_l1_del", 5) * l1_del +
                 getattr(args, "w_vgae_recon", 5.0) * recon_loss +
-                getattr(args, "w_vgae_kl", 1.0) * kl_loss
+                getattr(args, "w_vgae_kl", 1.0) * kl_loss +
+                getattr(args, "w_proto", 1.0) * proto_loss
         )
 
         # 4. (Optional) Budget Loss - 如有需要可在此处恢复
@@ -318,6 +495,7 @@ class MyExplainerV2(nn.Module):
             "cf": cf_loss.detach(),
             "recon": recon_loss.detach(),
             "kl": kl_loss.detach(),
+            "proto": proto_loss.detach(),
         }
 
     def _compute_cf_loss(self, logits, y_target, args):

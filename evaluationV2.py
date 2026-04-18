@@ -51,6 +51,7 @@ def evaluate(args, model, gnn, data_loader):
     # 1. 预计算原始预测（不计入 runtime 和 oracle_calls）
     y_desired_all = []
     ori_prob_all = []
+    ori_pred_all = []
     with torch.no_grad():
         for batch in data_loader:
             origraphs = batch['graphs'].to(args.device)
@@ -60,6 +61,7 @@ def evaluate(args, model, gnn, data_loader):
             y_desired = (1 - ori_pred).float().unsqueeze(1)
             y_desired_all.append(y_desired.cpu())
             ori_prob_all.append(ori_prob.cpu())
+            ori_pred_all.append(ori_pred.cpu())
     device = args.device
 
 
@@ -68,6 +70,8 @@ def evaluate(args, model, gnn, data_loader):
     valid_cf = 0
     fidel_sum = 0.00
     sparsity_sum = 0.00
+    class_total = {0: 0, 1: 0}
+    class_success = {0: 0, 1: 0}
 
 
     total = data_loader.dataset.__len__()
@@ -85,6 +89,7 @@ def evaluate(args, model, gnn, data_loader):
 
             # ✅ 使用预计算的y_desired，确保每个epoch一致
             y_desired = y_desired_all[batch_idx].to(args.device)
+            ori_pred = ori_pred_all[batch_idx].to(args.device).view(-1).long()
             y_hat = (1 - y_desired).float()
 
             # 2. CF 生成 —— 仅此阶段计入 runtime 和 oracle_calls
@@ -115,7 +120,13 @@ def evaluate(args, model, gnn, data_loader):
                     print(f"            sparsity = 1 - ({exp_edges}/{ori_edges}) = {1 - exp_edges/ori_edges:.4f}")
 
             # 3. 验证与指标计算（不计入 oracle_calls，使用原始 gnn）
-            valid_cf += count_valid(y_desired, cf_graphs, gnn)
+            success_mask = get_flip_success_mask(y_desired, cf_graphs, gnn)
+            valid_cf += int(success_mask.sum().item())
+            for class_idx in class_total:
+                class_mask = (ori_pred == class_idx)
+                class_total[class_idx] += int(class_mask.sum().item())
+                if class_mask.any():
+                    class_success[class_idx] += int(success_mask[class_mask].sum().item())
             proximity += compute_proximity(args, cf_graphs, origraphs)
             fidel_sum += compute_fidelity_prob(args, origraphs, cf_graphs, ori_prob_all[batch_idx], gnn)
             sparsity_sum += compute_sparsity(args, origraphs, cf_graphs)
@@ -133,6 +144,15 @@ def evaluate(args, model, gnn, data_loader):
 
     avg_runtime_per_graph = total_cf_time / total if total > 0 else 0.0
     avg_oracle_calls_per_graph = wrapped_gnn.oracle_calls / total if total > 0 else 0.0
+    per_class_flip = {}
+    for class_idx in class_total:
+        total_class = class_total[class_idx]
+        success_class = class_success[class_idx]
+        per_class_flip[class_idx] = {
+            "successful": success_class,
+            "total": total_class,
+            "ratio": success_class / total_class if total_class > 0 else 0.0,
+        }
 
     args.train_mode = True
 
@@ -146,17 +166,20 @@ def evaluate(args, model, gnn, data_loader):
         # 下面两个为“平均每张图”的耗时与调用次数
         "runtime": avg_runtime_per_graph,
         "oracle_calls": avg_oracle_calls_per_graph,
+        "per_class_flip": per_class_flip,
     }
 
 
-def count_valid(target_lables, cf_graphs, gnn):
+def get_flip_success_mask(target_lables, cf_graphs, gnn):
     gnn.eval()
 
     pred_logits_cf = gnn.get_pred(cf_graphs.x, cf_graphs.edge_index, cf_graphs.batch)[0]
-    print(pred_logits_cf)
-    pred_labels_cf = pred_logits_cf.argmax(dim=1).view(-1,1)
+    pred_labels_cf = pred_logits_cf.argmax(dim=1).view(-1, 1)
+    return (pred_labels_cf == target_lables).view(-1)
 
-    flipped_lables = (pred_labels_cf == target_lables).sum().item()
+
+def count_valid(target_lables, cf_graphs, gnn):
+    flipped_lables = get_flip_success_mask(target_lables, cf_graphs, gnn).sum().item()
 
     return flipped_lables
 
