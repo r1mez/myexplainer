@@ -158,6 +158,12 @@ def parse_args():
     # 数据参数
     parser.add_argument('--top_k', type=int, default=1, help='Number of similar graphs for pairing')
     parser.add_argument('--threshold', type=float, default=0, help='Prediction confidence threshold')
+    parser.add_argument(
+        '--subgraph_sample_threshold',
+        type=float,
+        default=None,
+        help='Subgraph sampling edge probability threshold; uses dataset-specific default when unset',
+    )
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
 
     # 模型参数

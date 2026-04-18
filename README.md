@@ -232,10 +232,13 @@ python myexplainer_train_v2.py --dataset ba2motif --train_mode False
 | `--dropout` | `0.1` | dropout 比例 |
 | `--top_k` | `1` | 相似图配对相关参数，当前主流程中保留 |
 | `--threshold` | `0` | 预测置信度阈值相关参数 |
+| `--subgraph_sample_threshold` | `None` | 子图采样边概率阈值；未设置时按数据集使用默认值 |
 | `--subgraph_method` | `genGraphEx` | 频繁子图生成方法 |
 | `--proto_topk` | `100` | 每个类别用于构造 prototype 的 top-k pattern 数量 |
 | `--proto_refresh_every` | `5` | 每隔多少个 epoch 刷新一次类别 prototype |
 | `--w_proto` | `1.0` | prototype alignment loss 权重 |
+
+其中 `--threshold` 用于预测置信度筛选，`--subgraph_sample_threshold` 用于 `subgraph_method.py` 中的子图采样边概率阈值。若未显式传入 `--subgraph_sample_threshold`，当前默认按数据集选择：`ba2motif=0.97`，`mutag/proteins/alkane_carbonyl/fluoride_carbonyl/nci1=0.70`。
 
 模型内部还支持若干 loss 权重的默认值，例如 `w_cf`、`w_l1_add`、`w_l1_del`、`w_vgae_recon`、`w_vgae_kl`。这些权重目前通过 `getattr(args, ..., default)` 读取，若需要命令行调参，可以在 `parse_args()` 中补充对应参数。
 

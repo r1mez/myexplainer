@@ -10,6 +10,16 @@ from torch_geometric.utils import to_networkx
 import igraph as ig
 
 
+DATASET_SUBGRAPH_SAMPLE_THRESHOLDS = {
+    "ba2motif": 0.97,
+    "mutag": 0.70,
+    "proteins": 0.70,
+    "alkane_carbonyl": 0.70,
+    "fluoride_carbonyl": 0.70,
+    "nci1": 0.70,
+}
+
+
 def _infer_node_color(node_attrs) -> int:
     if "type" in node_attrs:
         return int(node_attrs["type"])
@@ -219,7 +229,16 @@ def _make_discriminative_families(raw_patterns, datasets, args):
     return result
 
 
-def _sample_discrete_patterns(class_zero_dataset, class_one_dataset, num_samples):
+def _resolve_subgraph_sample_threshold(args, dataset_name, historical_default):
+    explicit_threshold = getattr(args, "subgraph_sample_threshold", None)
+    if explicit_threshold is not None:
+        return float(explicit_threshold)
+    return float(
+        DATASET_SUBGRAPH_SAMPLE_THRESHOLDS.get(dataset_name, historical_default)
+    )
+
+
+def _sample_discrete_patterns(class_zero_dataset, class_one_dataset, num_samples, threshold):
     patterns_0 = []
     patterns_1 = []
 
@@ -240,6 +259,7 @@ def _sample_discrete_patterns(class_zero_dataset, class_one_dataset, num_samples
                 max_nodes_0,
                 X,
                 Adj,
+                threshold=threshold,
                 num_node_features=feature_dim,
                 visualize=True,
             )
@@ -252,6 +272,7 @@ def _sample_discrete_patterns(class_zero_dataset, class_one_dataset, num_samples
                 max_nodes_1,
                 X,
                 Adj,
+                threshold=threshold,
                 num_node_features=feature_dim,
                 visualize=True,
             )
@@ -261,26 +282,65 @@ def _sample_discrete_patterns(class_zero_dataset, class_one_dataset, num_samples
 
 
 def subgraph_mining(args,datasets):
+    dataset_name = args.dataset.lower()
     if args.subgraph_method == 'genGraphEx':
         patterns_0 = []
         patterns_1 = []
-        if args.dataset == 'ba2motif':
+        if dataset_name == 'ba2motif':
+            sample_threshold = _resolve_subgraph_sample_threshold(args, dataset_name, 0.97)
+            print(
+                f"  Using subgraph sample threshold {sample_threshold:.2f} "
+                f"for dataset '{dataset_name}'"
+            )
             Bdist, mean_estimate, result, Adj = GraphRepModel(datasets[0],25)
             for i in range(50):
-                patterns_0.append(graphsampler(25,Bdist, mean_estimate, result, Adj))
+                patterns_0.append(
+                    graphsampler(
+                        25,
+                        Bdist,
+                        mean_estimate,
+                        result,
+                        Adj,
+                        threshold=sample_threshold,
+                    )
+                )
 
             Bdist, mean_estimate, result, Adj = GraphRepModel(datasets[1],25)
             for i in range(50):
-                patterns_1.append(graphsampler(25,Bdist, mean_estimate, result, Adj))
-        if args.dataset in {'mutag', 'proteins', 'alkane_carbonyl', 'fluoride_carbonyl'}:
-            patterns_0, patterns_1 = _sample_discrete_patterns(
-                datasets[0], datasets[1], num_samples=100
+                patterns_1.append(
+                    graphsampler(
+                        25,
+                        Bdist,
+                        mean_estimate,
+                        result,
+                        Adj,
+                        threshold=sample_threshold,
+                    )
+                )
+        elif dataset_name in {'mutag', 'proteins', 'alkane_carbonyl', 'fluoride_carbonyl'}:
+            sample_threshold = _resolve_subgraph_sample_threshold(args, dataset_name, 0.70)
+            print(
+                f"  Using subgraph sample threshold {sample_threshold:.2f} "
+                f"for dataset '{dataset_name}'"
             )
-        if args.dataset == 'nci1':
             patterns_0, patterns_1 = _sample_discrete_patterns(
-                datasets[0], datasets[1], num_samples=10000
+                datasets[0], datasets[1], num_samples=100, threshold=sample_threshold
             )
-        if args.dataset == '__legacy_proteins_branch__':
+        elif dataset_name == 'nci1':
+            sample_threshold = _resolve_subgraph_sample_threshold(args, dataset_name, 0.70)
+            print(
+                f"  Using subgraph sample threshold {sample_threshold:.2f} "
+                f"for dataset '{dataset_name}'"
+            )
+            patterns_0, patterns_1 = _sample_discrete_patterns(
+                datasets[0], datasets[1], num_samples=10000, threshold=sample_threshold
+            )
+        elif dataset_name == '__legacy_proteins_branch__':
+            sample_threshold = _resolve_subgraph_sample_threshold(args, dataset_name, 0.70)
+            print(
+                f"  Using subgraph sample threshold {sample_threshold:.2f} "
+                f"for dataset '{dataset_name}'"
+            )
             # 槽位行数 N 须 ≥ 该类内最大节点数，否则 X[j] 行越界（PROTEINS 常有图 >75 节点）
             nf0 = max((int(d.x.shape[1]) for d in datasets[0]), default=1)
             nf1 = max((int(d.x.shape[1]) for d in datasets[1]), default=1)
@@ -289,10 +349,26 @@ def subgraph_mining(args,datasets):
             N1 = max((int(d.num_nodes) for d in datasets[1]), default=1)
             X, Adj = GraphRepModelDiscrete(datasets[0], N0)
             for i in range(100):
-                patterns_0.append(graphsamplerDiscrete(N0, X, Adj, num_node_features=nf))
+                patterns_0.append(
+                    graphsamplerDiscrete(
+                        N0,
+                        X,
+                        Adj,
+                        threshold=sample_threshold,
+                        num_node_features=nf,
+                    )
+                )
             X, Adj = GraphRepModelDiscrete(datasets[1], N1)
             for i in range(100):
-                patterns_1.append(graphsamplerDiscrete(N1, X, Adj, num_node_features=nf))
+                patterns_1.append(
+                    graphsamplerDiscrete(
+                        N1,
+                        X,
+                        Adj,
+                        threshold=sample_threshold,
+                        num_node_features=nf,
+                    )
+                )
         # 对patterns中的所有图按照key1(节点数)和key2(度数)进行排序
         sort_key = lambda G: (G.number_of_nodes(), nx.density(G))
         patterns_0.sort(key=sort_key, reverse=True)
