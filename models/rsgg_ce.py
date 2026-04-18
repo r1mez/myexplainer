@@ -820,9 +820,9 @@ def evaluate_rsgg_ce(
 
 
 if __name__ == "__main__":
-    dataset_name = os.environ.get("MYEXPLAINER_DATASET", "fluoride_carbonyl")
+    dataset_name = os.environ.get("MYEXPLAINER_DATASET", "mutag")
     epochs = int(os.environ.get("RSGG_CE_EPOCHS", "100"))
-    lr = float(os.environ.get("RSGG_CE_LR", "0.001"))
+    lr = float(os.environ.get("RSGG_CE_LR", "0.0001"))
     sampling_iterations = int(os.environ.get("RSGG_CE_SAMPLING_ITERATIONS", "500"))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

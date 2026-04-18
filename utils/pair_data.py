@@ -30,8 +30,8 @@ class MappedDataset(Dataset):
             patterns: 频繁子图的字典（{0：patterns_0, 1: patterns_1}）
         """
         # 预先缓存 pattern 的 igraph 表示，避免为每个样本重复转换
-        self.patterns_0 = self._prepare_patterns(patterns[0])
-        self.patterns_1 = self._prepare_patterns(patterns[1])
+        self.patterns_0 = self._prepare_patterns(self._get_class_patterns(patterns, 0))
+        self.patterns_1 = self._prepare_patterns(self._get_class_patterns(patterns, 1))
         self.device = args.device
         self.graphs = []  # 存储所有单个图
         self.subgraphs = []  # 存储所有图的频繁子图
@@ -67,12 +67,30 @@ class MappedDataset(Dataset):
         for data in dataset:
             self.graphs.append(data)
 
+    def _get_class_patterns(self, patterns, class_idx):
+        if patterns is None:
+            return []
+        if isinstance(patterns, dict):
+            return patterns.get(class_idx, [])
+        if 0 <= class_idx < len(patterns):
+            return patterns[class_idx]
+        return []
+
+    def _pattern_to_nx(self, pattern_item):
+        if isinstance(pattern_item, dict):
+            return pattern_item.get("representative_nx")
+        return pattern_item
+
     def _prepare_patterns(self, patterns):
         prepared_patterns = []
-        for pattern_nx in patterns:
+        for pattern_item in patterns:
+            pattern_nx = self._pattern_to_nx(pattern_item)
+            if pattern_nx is None or pattern_nx.number_of_nodes() == 0:
+                continue
             prepared_patterns.append({
                 "nx": pattern_nx,
                 "ig": nx_to_igraph(pattern_nx),
+                "meta": pattern_item if isinstance(pattern_item, dict) else None,
             })
         return prepared_patterns
 
@@ -84,7 +102,13 @@ class MappedDataset(Dataset):
         for idx in tqdm(range(len(self.graphs)), desc="  Computing masks"):
             graph = self.graphs[idx]
 
-            if self.labels[idx] == 0:
+            label = self.labels[idx]
+            if isinstance(label, torch.Tensor):
+                label = int(label.item())
+            else:
+                label = int(label)
+
+            if label == 0:
                 patterns = self.patterns_0
             else:
                 patterns = self.patterns_1

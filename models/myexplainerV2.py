@@ -204,6 +204,13 @@ class MyExplainerV2(nn.Module):
                 if class_graphs is None:
                     continue
 
+                weights = None
+                if isinstance(class_graphs, dict):
+                    weights = class_graphs.get("weights")
+                    class_graphs = class_graphs.get("graphs")
+                    if class_graphs is None:
+                        continue
+
                 if isinstance(class_graphs, list):
                     if len(class_graphs) == 0:
                         continue
@@ -224,7 +231,22 @@ class MyExplainerV2(nn.Module):
                 if class_embed.numel() == 0:
                     continue
 
-                prototype_values[class_idx] = class_embed.mean(dim=0)
+                if weights is not None:
+                    weights = torch.as_tensor(weights, dtype=class_embed.dtype, device=self.device).view(-1)
+                    if weights.numel() != class_embed.size(0):
+                        min_len = min(weights.numel(), class_embed.size(0))
+                        weights = weights[:min_len]
+                        class_embed = class_embed[:min_len]
+                    if weights.numel() == 0:
+                        continue
+                    weight_sum = weights.sum()
+                    if weight_sum.item() <= 0:
+                        weights = torch.ones_like(weights) / max(weights.numel(), 1)
+                    else:
+                        weights = weights / weight_sum
+                    prototype_values[class_idx] = torch.sum(class_embed * weights.unsqueeze(-1), dim=0)
+                else:
+                    prototype_values[class_idx] = class_embed.mean(dim=0)
                 availability[class_idx] = True
 
         if was_training:
@@ -485,7 +507,7 @@ class MyExplainerV2(nn.Module):
                 getattr(args, "w_l1_del", 5) * l1_del +
                 getattr(args, "w_vgae_recon", 5.0) * recon_loss +
                 getattr(args, "w_vgae_kl", 1.0) * kl_loss +
-                getattr(args, "w_proto", 1.0) * proto_loss
+                getattr(args, "w_proto", 0.1) * proto_loss
         )
 
         # 4. (Optional) Budget Loss - 如有需要可在此处恢复

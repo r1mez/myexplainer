@@ -77,6 +77,30 @@ def pattern_nx_to_data(pattern_nx, x_dim):
     return Data(x=x, edge_index=edge_index, num_nodes=num_nodes)
 
 
+def pattern_family_to_nx(pattern_item):
+    if isinstance(pattern_item, dict):
+        return pattern_item.get("representative_nx")
+    return pattern_item
+
+
+def pattern_family_support(pattern_item):
+    if isinstance(pattern_item, dict):
+        return float(pattern_item.get("in_class_support", 1.0))
+    return 1.0
+
+
+def pattern_family_score(pattern_item):
+    if isinstance(pattern_item, dict):
+        return float(pattern_item.get("score", 1.0))
+    return 1.0
+
+
+def pattern_family_weight(pattern_item):
+    support = pattern_family_support(pattern_item)
+    score = max(pattern_family_score(pattern_item), 0.0)
+    return support * score
+
+
 def build_prototype_bank(patterns, x_dim, topk):
     prototype_bank = {}
     prototype_counts = {}
@@ -88,13 +112,34 @@ def build_prototype_bank(patterns, x_dim, topk):
 
     for class_idx, class_patterns in pattern_items:
         valid_graphs = []
-        for pattern_nx in class_patterns[:topk]:
+        weights = []
+        fallback_weights = []
+        scores = []
+
+        for pattern_item in class_patterns[:topk]:
+            pattern_nx = pattern_family_to_nx(pattern_item)
             data = pattern_nx_to_data(pattern_nx, x_dim)
             if data is not None:
                 valid_graphs.append(data)
+                weights.append(pattern_family_weight(pattern_item))
+                fallback_weights.append(pattern_family_support(pattern_item))
+                scores.append(pattern_family_score(pattern_item))
 
         prototype_counts[int(class_idx)] = len(valid_graphs)
-        prototype_bank[int(class_idx)] = Batch.from_data_list(valid_graphs) if valid_graphs else None
+        if valid_graphs:
+            weight_tensor = torch.tensor(weights, dtype=torch.float)
+            fallback_tensor = torch.tensor(fallback_weights, dtype=torch.float)
+            unique_scores = {round(score, 12) for score in scores}
+
+            if weight_tensor.sum().item() <= 0 or len(unique_scores) <= 1:
+                weight_tensor = fallback_tensor if fallback_tensor.sum().item() > 0 else torch.ones_like(weight_tensor)
+
+            prototype_bank[int(class_idx)] = {
+                "graphs": Batch.from_data_list(valid_graphs),
+                "weights": weight_tensor,
+            }
+        else:
+            prototype_bank[int(class_idx)] = None
 
     return prototype_bank, prototype_counts
 
@@ -103,7 +148,7 @@ def parse_args():
 
     # 基础设置
     parser.add_argument('--cuda', type=int, default=0, help='GPU device')
-    parser.add_argument('--dataset', type=str, default='ba2motif', help='Dataset name')
+    parser.add_argument('--dataset', type=str, default='nci1', help='Dataset name')
     parser.add_argument('--gnn_path', type=str, default='param/', help='GNN directory')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use (cpu or cuda)')
     parser.add_argument('--train_mode',type=bool,default=True,help='Current mode')
@@ -129,8 +174,12 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
     parser.add_argument('--w_proto', type=float, default=1.0, help='Prototype alignment loss weight')
-    parser.add_argument('--proto_topk', type=int, default=100, help='Top-K frequent patterns per class for prototypes')
+    parser.add_argument('--proto_topk', type=int, default=100, help='Top-K discriminative pattern families per class')
     parser.add_argument('--proto_refresh_every', type=int, default=5, help='Refresh prototypes every N epochs')
+    parser.add_argument('--pattern_family_min_count', type=int, default=2,
+                        help='Minimum generated samples needed to keep a pattern family candidate')
+    parser.add_argument('--pattern_min_support', type=float, default=0.05,
+                        help='Minimum in-class graph support required for a discriminative pattern family')
 
     parser.add_argument('--subgraph_method',type=str,default='genGraphEx',help='Subgraph method')
 

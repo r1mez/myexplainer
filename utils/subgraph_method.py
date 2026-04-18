@@ -6,6 +6,217 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import torch
 from torch.distributions import Categorical
+from torch_geometric.utils import to_networkx
+import igraph as ig
+
+
+def _infer_node_color(node_attrs) -> int:
+    if "type" in node_attrs:
+        return int(node_attrs["type"])
+
+    x = node_attrs.get("x")
+    if x is None:
+        return -1
+
+    if isinstance(x, torch.Tensor):
+        x = x.detach().cpu().numpy()
+    elif isinstance(x, list):
+        x = np.asarray(x)
+
+    if np.isscalar(x):
+        return int(x)
+
+    x = np.asarray(x).reshape(-1)
+    if x.size == 0:
+        return -1
+    if x.size == 1:
+        return int(round(float(x[0])))
+    return int(np.argmax(x))
+
+
+def _remove_self_loops(g: nx.Graph) -> nx.Graph:
+    g2 = g.copy()
+    g2.remove_edges_from(nx.selfloop_edges(g2))
+    return g2
+
+
+def _normalize_pattern_graph(g: nx.Graph) -> nx.Graph:
+    g_norm = _remove_self_loops(g.to_undirected() if g.is_directed() else g)
+    g_norm = g_norm.copy()
+    for node in g_norm.nodes():
+        g_norm.nodes[node]["_node_color"] = _infer_node_color(g_norm.nodes[node])
+    return g_norm
+
+
+def _pattern_signature(g: nx.Graph):
+    g_norm = _normalize_pattern_graph(g)
+    colors = [_infer_node_color(g_norm.nodes[node]) for node in g_norm.nodes()]
+    color_degree = [
+        (_infer_node_color(g_norm.nodes[node]), int(g_norm.degree[node]))
+        for node in g_norm.nodes()
+    ]
+    return (
+        g_norm.number_of_nodes(),
+        g_norm.number_of_edges(),
+        tuple(sorted(colors)),
+        tuple(sorted(color_degree)),
+    )
+
+
+def _node_color_match(attrs_a, attrs_b) -> bool:
+    return _infer_node_color(attrs_a) == _infer_node_color(attrs_b)
+
+
+def _are_isomorphic(g_a: nx.Graph, g_b: nx.Graph) -> bool:
+    if g_a.number_of_nodes() != g_b.number_of_nodes():
+        return False
+    if g_a.number_of_edges() != g_b.number_of_edges():
+        return False
+    return nx.is_isomorphic(g_a, g_b, node_match=_node_color_match)
+
+
+def _build_pattern_families(patterns):
+    families = []
+    buckets = {}
+
+    for pattern in patterns:
+        if pattern is None or pattern.number_of_nodes() == 0:
+            continue
+
+        pattern_norm = _normalize_pattern_graph(pattern)
+        signature = _pattern_signature(pattern_norm)
+        matched_family_idx = None
+
+        for family_idx in buckets.get(signature, []):
+            family = families[family_idx]
+            if _are_isomorphic(pattern_norm, family["representative_nx"]):
+                matched_family_idx = family_idx
+                break
+
+        if matched_family_idx is None:
+            family = {
+                "representative_nx": pattern_norm,
+                "generated_count": 1,
+                "num_nodes": pattern_norm.number_of_nodes(),
+                "density": nx.density(pattern_norm) if pattern_norm.number_of_nodes() > 1 else 0.0,
+                "in_class_match_count": 0,
+                "out_class_match_count": 0,
+                "in_class_support": 0.0,
+                "out_class_support": 0.0,
+                "score": 0.0,
+            }
+            families.append(family)
+            buckets.setdefault(signature, []).append(len(families) - 1)
+        else:
+            families[matched_family_idx]["generated_count"] += 1
+
+    return families
+
+
+def _data_to_matching_igraph(data):
+    g_nx = to_networkx(data, node_attrs=["x"]).to_undirected()
+    return _nx_to_igraph(g_nx)
+
+
+def _nx_to_igraph(g_nx: nx.Graph) -> ig.Graph:
+    g_nx = _remove_self_loops(g_nx.to_undirected() if g_nx.is_directed() else g_nx)
+    nodes = list(g_nx.nodes())
+    node_index = {node: i for i, node in enumerate(nodes)}
+    edges = [(node_index[u], node_index[v]) for u, v in g_nx.edges()]
+
+    g_ig = ig.Graph(n=len(nodes), edges=edges, directed=False)
+    g_ig.vs["node_color"] = [_infer_node_color(g_nx.nodes[node]) for node in nodes]
+    return g_ig
+
+
+def _has_subgraph_match(graph_ig, pattern_ig) -> bool:
+    if pattern_ig.vcount() == 0:
+        return False
+    if graph_ig.vcount() < pattern_ig.vcount() or graph_ig.ecount() < pattern_ig.ecount():
+        return False
+
+    graph_colors = graph_ig.vs["node_color"] if "node_color" in graph_ig.vs.attributes() else None
+    pattern_colors = pattern_ig.vs["node_color"] if "node_color" in pattern_ig.vs.attributes() else None
+    is_match, _, _ = graph_ig.subisomorphic_vf2(
+        pattern_ig,
+        color1=graph_colors,
+        color2=pattern_colors,
+        return_mapping_21=True,
+    )
+    return bool(is_match)
+
+
+def _count_graph_support(pattern_nx, graph_igs) -> int:
+    pattern_ig = _nx_to_igraph(pattern_nx)
+    return sum(1 for graph_ig in graph_igs if _has_subgraph_match(graph_ig, pattern_ig))
+
+
+def _score_pattern_families(families, class_idx, datasets):
+    in_dataset = datasets.get(class_idx, [])
+    out_dataset = []
+    for other_class, class_dataset in datasets.items():
+        if other_class != class_idx:
+            out_dataset.extend(list(class_dataset))
+
+    in_graphs = [_data_to_matching_igraph(data) for data in in_dataset]
+    out_graphs = [_data_to_matching_igraph(data) for data in out_dataset]
+
+    in_total = max(len(in_graphs), 1)
+    out_total = max(len(out_graphs), 1)
+
+    for family in families:
+        representative = family["representative_nx"]
+        in_count = _count_graph_support(representative, in_graphs)
+        out_count = _count_graph_support(representative, out_graphs)
+        in_support = in_count / in_total
+        out_support = out_count / out_total
+
+        family["in_class_match_count"] = in_count
+        family["out_class_match_count"] = out_count
+        family["in_class_support"] = in_support
+        family["out_class_support"] = out_support
+        family["score"] = in_support - out_support
+
+    return families
+
+
+def _filter_and_sort_families(families, args):
+    min_count = max(1, int(getattr(args, "pattern_family_min_count", 2)))
+    min_support = float(getattr(args, "pattern_min_support", 0.05))
+    topk = int(getattr(args, "proto_topk", len(families)))
+
+    def sort_key(family):
+        return (
+            family["score"],
+            family["generated_count"],
+            family["num_nodes"],
+            family["density"],
+        )
+
+    eligible = [
+        family for family in families
+        if family["generated_count"] >= min_count and family["in_class_support"] >= min_support
+    ]
+
+    if not eligible:
+        eligible = families
+
+    eligible.sort(key=sort_key, reverse=True)
+    return eligible[:topk]
+
+
+def _make_discriminative_families(raw_patterns, datasets, args):
+    result = {}
+    for class_idx, class_patterns in raw_patterns.items():
+        families = _build_pattern_families(class_patterns)
+        families = _score_pattern_families(families, class_idx, datasets)
+        selected_families = _filter_and_sort_families(families, args)
+        result[class_idx] = selected_families
+        print(
+            f"  Class {class_idx} patterns: raw={len(class_patterns)}, "
+            f"families={len(families)}, selected={len(selected_families)}"
+        )
+    return result
 
 
 def _sample_discrete_patterns(class_zero_dataset, class_one_dataset, num_samples):
@@ -86,7 +297,8 @@ def subgraph_mining(args,datasets):
         sort_key = lambda G: (G.number_of_nodes(), nx.density(G))
         patterns_0.sort(key=sort_key, reverse=True)
         patterns_1.sort(key=sort_key, reverse=True)
-        return {0: patterns_0, 1: patterns_1}
+        raw_patterns = {0: patterns_0, 1: patterns_1}
+        return _make_discriminative_families(raw_patterns, datasets, args)
 
 # # 连续节点特征
 def GraphRepModel(classdata,N):
@@ -329,7 +541,7 @@ def GraphRepModelDiscrete(targetclass, N=111):
     return X, Adj
 
 
-def graphsamplerDiscrete(N, X, Adj, threshold=0.9, num_node_features=37, visualize=False):
+def graphsamplerDiscrete(N, X, Adj, threshold=0.7, num_node_features=14, visualize=False):
     """
     Gen-GraphEx 生成器（通用适配版）
 
