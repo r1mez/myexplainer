@@ -1,5 +1,6 @@
 
 from .mutag_gnn import Mutag_GCN
+from .mutag188_gnn import Mutag188_GCN
 from .nci1_gnn import NCI1GCN
 from .alkane_carbonyl_gnn import AlkaneCarbonylGCN
 from .fluoride_carbonyl_gnn import FluorideCarbonylGCN
@@ -9,6 +10,7 @@ from .benzene_gcn import Benzene_GCN
 from .proteins_gnn import PROTEINSGCN
 __all__ = [
     "Mutag_GCN",
+    "Mutag188_GCN",
     "NCI1GCN",
     "AlkaneCarbonylGCN",
     "FluorideCarbonylGCN",

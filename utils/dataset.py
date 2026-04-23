@@ -1,6 +1,7 @@
 import os
 
 from datasets import Mutagenicity
+from datasets import MUTAG188
 from datasets import NCI1
 from datasets import AlkaneCarbonyl
 from datasets import FluorideCarbonyl
@@ -33,6 +34,11 @@ def get_datasets(name, root="data/"):
         train_dataset = Mutagenicity(folder, mode="training")
         test_dataset = Mutagenicity(folder, mode="testing")
         val_dataset = Mutagenicity(folder, mode="evaluation")
+    elif name == "mutag188":
+        folder = os.path.join(root, "mutag188")
+        train_dataset = MUTAG188(folder, mode="training")
+        test_dataset = MUTAG188(folder, mode="testing")
+        val_dataset = MUTAG188(folder, mode="evaluation")
     elif name == "nci1":
         folder = os.path.join(root, "NCI1")
         train_dataset = NCI1(folder, mode="training")

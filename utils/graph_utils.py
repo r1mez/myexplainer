@@ -12,15 +12,19 @@ import re
 from time import time
 
 MUTAG_atom_map = { 0: 'C', 1: 'O', 2: 'Cl', 3: 'H', 4: 'N', 5: 'F', 6: 'Br', 7: 'S', 8: 'P', 9: 'I', 10: 'Na', 11: 'K', 12: 'Li', 13: 'Ca'}
+MUTAG188_atom_map = {0: 'C', 1: 'N', 2: 'O', 3: 'F', 4: 'I', 5: 'Cl', 6: 'Br'}
 BBBP_atom_map = {1: 'H', 5: 'B', 6: 'C', 7: 'N', 8: 'O', 9: 'F', 11: 'Na', 15: 'P', 16: 'S', 17: 'Cl', 20: 'Ca', 35: 'Br', 53: 'I'}
-atom_map = {"mutag":MUTAG_atom_map, "bbbp":BBBP_atom_map}
+atom_map = {"mutag":MUTAG_atom_map, "mutag188": MUTAG188_atom_map, "bbbp":BBBP_atom_map}
 
 MUTAG_bond_map = {0: Chem.BondType.SINGLE,1: Chem.BondType.DOUBLE,2: Chem.BondType.TRIPLE}
+MUTAG188_bond_map = {0: Chem.BondType.AROMATIC, 1: Chem.BondType.SINGLE, 2: Chem.BondType.DOUBLE, 3: Chem.BondType.TRIPLE}
 BBBP_bond_map = {1: Chem.BondType.SINGLE,2: Chem.BondType.DOUBLE,3: Chem.BondType.TRIPLE,4: Chem.BondType.AROMATIC}
-bond_map = {"mutag":MUTAG_bond_map, "bbbp":BBBP_bond_map}
+bond_map = {"mutag":MUTAG_bond_map, "mutag188": MUTAG188_bond_map, "bbbp":BBBP_bond_map}
 
 MUTAG_idx_map = {'C': 0, 'O': 1, 'Cl': 2, 'H': 3, 'N': 4, 'F': 5, 'Br': 6, 'S': 7, 'P': 8, 'I': 9, 'Na': 10, 'K': 11,
                   'Li': 12, 'Ca': 13}
+MUTAG188_idx_map = {'C': 0, 'N': 1, 'O': 2, 'F': 3, 'I': 4, 'Cl': 5, 'Br': 6}
+atom_idx_map = {"mutag": MUTAG_idx_map, "mutag188": MUTAG188_idx_map}
 
 def smarts_to_data(dataset_name, smarts):
     """
@@ -49,10 +53,14 @@ def smarts_to_data(dataset_name, smarts):
     except:
         raise ValueError(f"Failed to sanitize or compute aromaticity for SMARTS: {smarts}")
 
-    # Get atom features (one-hot encoding based on MUTAG_atom_map)
+    if dataset_name not in atom_map or dataset_name not in atom_idx_map:
+        raise ValueError(f"SMARTS conversion is not configured for dataset {dataset_name}")
+
+    # Get atom features (one-hot encoding based on dataset atom map)
     num_atoms = mol.GetNumAtoms()
     num_atom_types = len(atom_map[dataset_name])
     atom_features = []
+    dataset_atom_idx_map = atom_idx_map[dataset_name]
 
     for atom in mol.GetAtoms():
         # Get atom symbol
@@ -62,7 +70,7 @@ def smarts_to_data(dataset_name, smarts):
 
         # Create one-hot encoding
         one_hot = [0] * num_atom_types
-        one_hot[MUTAG_idx_map[atom_symbol]] = 1
+        one_hot[dataset_atom_idx_map[atom_symbol]] = 1
         atom_features.append(one_hot)
 
     x = torch.tensor(atom_features, dtype=torch.float)
@@ -70,7 +78,7 @@ def smarts_to_data(dataset_name, smarts):
     # Get edge indices and edge attributes
     edge_index = []
     edge_attr = []
-    num_edge_types = len(bond_map[dataset_name])  # 3 types: single, double, triple
+    num_edge_types = len(bond_map[dataset_name])
     # Track bonds to alternate single/double for aromatic bonds
     bond_alternation = {}  # bond_idx -> mapped_bond_type (0 for single, 1 for double)
 
@@ -88,14 +96,21 @@ def smarts_to_data(dataset_name, smarts):
         # Determine bond type
         bond_type = bond.GetBondTypeAsDouble()
         if bond_type == 1.5 or bond_idx in aromatic_bonds:
-            # Aromatic bond: alternate between single (0) and double (1)
-            if bond_idx not in bond_alternation:
-                # Alternate based on bond index to ensure consistency
-                bond_alternation[bond_idx] = 0 if len(bond_alternation) % 2 == 0 else 1
-            mapped_bond_type = bond_alternation[bond_idx]
+            if dataset_name == "mutag188":
+                mapped_bond_type = 0
+            else:
+                # Aromatic bond: alternate between single (0) and double (1)
+                if bond_idx not in bond_alternation:
+                    # Alternate based on bond index to ensure consistency
+                    bond_alternation[bond_idx] = 0 if len(bond_alternation) % 2 == 0 else 1
+                mapped_bond_type = bond_alternation[bond_idx]
         elif bond_type in [1.0, 2.0, 3.0]:
-            # Non-aromatic: single (1.0) -> 0, double (2.0) -> 1, triple (3.0) -> 2
-            mapped_bond_type = int(bond_type - 1)
+            if dataset_name == "mutag188":
+                # Classic MUTAG keeps aromatic as 0, then single/double/triple as 1/2/3.
+                mapped_bond_type = int(bond_type)
+            else:
+                # Non-aromatic: single (1.0) -> 0, double (2.0) -> 1, triple (3.0) -> 2
+                mapped_bond_type = int(bond_type - 1)
         else:
             raise ValueError(f"Unsupported bond type: {bond_type} for bond {bond_idx}")
 
@@ -134,7 +149,7 @@ def data_to_mol(dataset_name, data):
     node_to_idx = {}
     for node_idx in range(data.x.size(0)):
         node_feature = data.x[node_idx]
-        if dataset_name == "mutag":
+        if dataset_name in {"mutag", "mutag188"}:
             # One-hot encoded node features
             atom_idx = torch.argmax(node_feature).item()
         if dataset_name == "bbbp":
@@ -158,7 +173,7 @@ def data_to_mol(dataset_name, data):
 
         # Handle edge attributes
         edge_feature = data.edge_attr[edge_idx]
-        if dataset_name == "mutag":
+        if dataset_name in {"mutag", "mutag188"}:
             # One-hot encoded bonds
             bond_idx = torch.argmax(edge_feature).item()
         if dataset_name == "bbbp":
