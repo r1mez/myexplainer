@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Graph Editor for GNN Re-Prediction</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Interactive Graph Editing</p>
+        <h1>图编辑器与 GNN 重预测</h1>
+        <p class="hero-copy">
+          选择一个数据集中的图，直接在浏览器里增删节点和边，然后把修改后的图送回
+          <code>param/gnns/</code> 下的被解释 GNN，观察类别概率变化。
+        </p>
+      </div>
+      <div class="hero-meta">
+        <div class="meta-card">
+          <span class="meta-label">Server</span>
+          <strong id="deviceBadge">Loading...</strong>
+        </div>
+        <div class="meta-card">
+          <span class="meta-label">Mode</span>
+          <strong>Pure Graph Editing</strong>
+        </div>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="left-rail">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>数据选择</h2>
+            <span id="datasetAvailability" class="muted-pill">Loading</span>
+          </div>
+          <div class="form-grid">
+            <label class="field">
+              <span>数据集</span>
+              <select id="datasetSelect"></select>
+            </label>
+            <label class="field">
+              <span>划分</span>
+              <select id="splitSelect">
+                <option value="training">training</option>
+                <option value="evaluation">evaluation</option>
+                <option value="testing">testing</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>图索引</span>
+              <input id="graphIndexInput" type="number" min="0" value="0">
+            </label>
+            <div class="field">
+              <span>当前范围</span>
+              <div id="graphCountHint" class="info-box">--</div>
+            </div>
+          </div>
+          <div class="button-row">
+            <button id="prevGraphButton" class="ghost-button" type="button">上一张</button>
+            <button id="nextGraphButton" class="ghost-button" type="button">下一张</button>
+            <button id="loadGraphButton" class="primary-button" type="button">加载图</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>编辑工具</h2>
+            <span id="toolHint" class="muted-pill">选择</span>
+          </div>
+          <div id="toolPalette" class="tool-grid">
+            <button data-tool="select" class="tool-button is-active" type="button">选择</button>
+            <button data-tool="add-node" class="tool-button" type="button">加节点</button>
+            <button data-tool="add-edge" class="tool-button" type="button">连边</button>
+            <button data-tool="delete-node" class="tool-button" type="button">删节点</button>
+            <button data-tool="delete-edge" class="tool-button" type="button">删边</button>
+          </div>
+          <div class="button-row">
+            <button id="resetGraphButton" class="ghost-button" type="button">重置到原图</button>
+            <button id="predictButton" class="primary-button" type="button">重新预测</button>
+          </div>
+          <div class="tip-stack">
+            <p>拖拽节点位置需要处于“选择”模式。</p>
+            <p>“连边”模式下先点起点，再点终点。</p>
+            <p>修改只存在于当前页面，不会写回数据集文件。</p>
+          </div>
+        </div>
+
+        <div class="panel status-panel">
+          <div class="panel-head">
+            <h2>状态</h2>
+          </div>
+          <div id="statusBox" class="status-box is-info">正在连接后端...</div>
+        </div>
+      </section>
+
+      <section class="canvas-panel panel">
+        <div class="panel-head">
+          <div>
+            <h2>图画布</h2>
+            <p id="graphSubtitle" class="subtle-copy">请选择一个图开始编辑。</p>
+          </div>
+          <div class="legend-strip">
+            <span><i class="swatch node-swatch"></i>节点</span>
+            <span><i class="swatch edge-swatch"></i>边</span>
+            <span><i class="swatch motif-swatch"></i>GT motif</span>
+            <span><i class="swatch select-swatch"></i>当前选中</span>
+          </div>
+        </div>
+        <div class="canvas-shell">
+          <svg id="graphCanvas" viewBox="0 0 900 620" aria-label="Graph editor canvas"></svg>
+        </div>
+      </section>
+
+      <aside class="right-rail">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>属性</h2>
+          </div>
+          <div id="propertyPanel" class="property-panel">
+            <p class="empty-state">加载图后，这里会显示节点或边的详细信息。</p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>预测结果</h2>
+            <span id="predictionHint" class="muted-pill">Waiting</span>
+          </div>
+          <div id="predictionPanel" class="prediction-panel">
+            <p class="empty-state">当前还没有预测结果。</p>
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="./app.js?v=mutag188" defer></script>
+</body>
+</html>
