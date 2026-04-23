@@ -77,7 +77,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
             #     y_desired=y_desired.view(-1, 1),
             #     edge_attr=getattr(origraphs, 'edge_attr', None)
             # )
-            outputs = model(origraphs, subgraphs)
+            outputs = model(origraphs, subgraphs, cond_labels=y_desired)
             loss_dict = model.compute_loss(args, origraphs, y_desired, outputs)
 
             if batch_idx in [0,1,2,3,4]:
@@ -153,7 +153,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
                 ori_pred = ori_pred_logits.argmax(dim=1)
                 y_desired = (1 - ori_pred).float().unsqueeze(1)
 
-                outputs = model(origraphs, subgraphs)
+                outputs = model(origraphs, subgraphs, cond_labels=y_desired)
                 loss_dict = model.compute_loss(args, origraphs, y_desired, outputs)
 
                 val_loss_accum += loss_dict["total"].item()

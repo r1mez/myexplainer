@@ -97,7 +97,8 @@ def evaluate(args, model, gnn, data_loader):
             t0 = time.time()
             outputs = model(
                 graphs=origraphs,
-                subgraphs=subgraphs
+                subgraphs=subgraphs,
+                cond_labels=y_desired,
             )
             total_cf_time += time.time() - t0
 
