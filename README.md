@@ -93,6 +93,7 @@ Evaluation Metrics
 | --- | --- | --- |
 | `ba2motif` | `data/ba2motif` | BA-2Motif 合成图数据集 |
 | `mutag` | `data/mutag` | Mutagenicity / MUTAG 分子图数据集 |
+| `mutag188` | `data/mutag188` | 经典 TU Dortmund MUTAG，188 张图；与四千多张图的 `mutag` 分开管理 |
 | `nci1` | `data/NCI1` | NCI1 分子图数据集 |
 | `bbbp` | `data/bbbp` | BBBP 分子图数据集 |
 | `benzene` | `data/benzene` | Benzene 相关分子图数据集 |
@@ -101,6 +102,8 @@ Evaluation Metrics
 | `proteins` | `data/proteins` | PROTEINS 图分类数据集 |
 
 运行前需要确保对应数据集已经处理为 PyTorch Geometric 可读取的格式，例如 `processed/training.pt`、`processed/testing.pt`、`processed/evaluation.pt`。
+
+`mutag188` 会优先从 `tmp_files/mutag188/` 复制 `MUTAG_A.txt`、`MUTAG_edge_labels.txt`、`MUTAG_graph_indicator.txt`、`MUTAG_graph_labels.txt`、`MUTAG_node_labels.txt` 到 `data/mutag188/raw/`，然后生成独立的 PyG processed 文件；它不会复用或覆盖 `data/mutag/` 中四千多张图的 Mutagenicity 数据。为便于和 4337 图版本的 `mutag` 对比，`mutag188` 的类别语义已对齐为 `0=mutagen`、`1=nonmutagen`。
 
 ## 环境依赖
 
@@ -152,6 +155,7 @@ pip install numpy scipy scikit-learn networkx python-igraph matplotlib tqdm pand
 data/
 ├── ba2motif/
 ├── mutag/
+├── mutag188/
 ├── NCI1/
 ├── bbbp/
 ├── benzene/
@@ -173,11 +177,65 @@ param/gnns/<dataset>_gcn.pt
 ```text
 param/gnns/ba2motif_gcn.pt
 param/gnns/mutag_gcn.pt
+param/gnns/mutag188_gcn.pt
 param/gnns/nci1_gcn.pt
 param/gnns/proteins_gcn.pt
 ```
 
 注意：当前代码中会使用 `args.dataset.lower()` 拼接权重文件名。在 Linux / macOS 等大小写敏感系统上，请确保权重文件名与小写数据集名一致，例如将 `NCI1_gcn.pt` 命名为 `nci1_gcn.pt`。
+
+## 交互式图编辑器
+
+仓库现在附带了一个独立的轻量 Web 模块 `graph_editor/`，用于在浏览器里手动编辑单张图，然后把修改后的图重新送回 `param/gnns/<dataset>_gcn.pt` 对应的被解释 GNN，直接观察类别概率变化。
+
+启动方式：
+
+```bash
+python -m graph_editor.server --host 127.0.0.1 --port 7860 --device cuda:0
+```
+
+可选参数：
+
+```text
+--host
+--port
+--device
+--data-root
+--param-root
+--default-dataset
+```
+
+远端服务器常见访问方式是 SSH 端口转发，例如：
+
+```bash
+ssh -L 7860:127.0.0.1:7860 <user>@<remote-host>
+```
+
+然后在本地浏览器打开：
+
+```text
+http://127.0.0.1:7860
+```
+
+当前编辑器支持以下数据集：
+
+```text
+mutag
+mutag188
+nci1
+bbbp
+ba2motif
+benzene
+alkane_carbonyl
+fluoride_carbonyl
+proteins
+```
+
+边界说明：
+
+- 编辑器是“纯图编辑”工具，不强制做化学合法性校验。
+- 页面中的修改不会写回 `data/`、`processed/*.pt` 或其他原始数据文件。
+- 当前版本只把编辑后的图重新送回被解释 GNN 做重预测，不会把修改后的图自动送入 explainer 主流程。
 
 ## 快速开始
 
@@ -197,6 +255,12 @@ python myexplainer_train_v2.py --dataset ba2motif --device cpu --epochs 100
 
 ```bash
 python myexplainer_train_v2.py --dataset mutag --cuda 0 --epochs 100 --batch_size 256
+```
+
+运行经典 188 图 MUTAG：
+
+```bash
+python myexplainer_train_v2.py --dataset mutag188 --cuda 0 --epochs 100 --batch_size 64
 ```
 
 运行 PROTEINS：
@@ -236,11 +300,11 @@ python myexplainer_train_v2.py --dataset ba2motif --train_mode False
 | `--subgraph_method` | `genGraphEx` | 频繁子图生成方法 |
 | `--proto_topk` | `100` | 每个类别用于构造 prototype 的 top-k pattern 数量 |
 | `--proto_refresh_every` | `5` | 每隔多少个 epoch 刷新一次类别 prototype |
-| `--w_proto` | `1.0` | prototype alignment loss 权重 |
+| `--loss_config_path` | `None` | 数据集级 loss 超参数 JSON；不传时使用 `configs/loss_hparams.json` |
 
-其中 `--threshold` 用于预测置信度筛选，`--subgraph_sample_threshold` 用于 `subgraph_method.py` 中的子图采样边概率阈值。若未显式传入 `--subgraph_sample_threshold`，当前默认按数据集选择：`ba2motif=0.97`，`mutag/proteins/alkane_carbonyl/fluoride_carbonyl/nci1=0.70`。
+其中 `--threshold` 用于预测置信度筛选，`--subgraph_sample_threshold` 用于 `subgraph_method.py` 中的子图采样边概率阈值。若未显式传入 `--subgraph_sample_threshold`，当前默认按数据集选择：`ba2motif=0.97`，`mutag/mutag188/proteins/alkane_carbonyl/fluoride_carbonyl=0.70`，`nci1=0.15`。
 
-模型内部还支持若干 loss 权重的默认值，例如 `w_cf`、`w_l1_add`、`w_l1_del`、`w_vgae_recon`、`w_vgae_kl`。这些权重目前通过 `getattr(args, ..., default)` 读取，若需要命令行调参，可以在 `parse_args()` 中补充对应参数。
+所有 loss 相关超参数已集中到 `configs/loss_hparams.json`，并按数据集名分开配置。当前每个数据集暂时使用相同的一组值；后续调参时只需要修改对应数据集条目，不需要改模型代码。
 
 ## 训练流程
 

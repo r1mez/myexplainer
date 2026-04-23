@@ -1,0 +1,112 @@
+{
+  "datasets": {
+    "ba2motif": {
+      "w_cf": 10.0,
+      "w_l1_add": 5.0,
+      "w_l1_del": 0.5,
+      "w_vgae_recon": 5.0,
+      "w_vgae_kl": 1.0,
+      "enable_fs_feature_recon": false,
+      "w_vgae_feat_recon": 1.0,
+      "w_proto": 0.0,
+      "cf_margin": 0.5,
+      "lambda_cf_margin": 1.0
+    },
+    "mutag": {
+      "w_cf": 10.0,
+      "w_l1_add": 5.0,
+      "w_l1_del": 0.5,
+      "w_vgae_recon": 5.0,
+      "w_vgae_kl": 1.0,
+      "enable_fs_feature_recon": false,
+      "w_vgae_feat_recon": 1.0,
+      "w_proto": 0.0,
+      "cf_margin": 0.5,
+      "lambda_cf_margin": 1.0
+    },
+    "mutag188": {
+      "w_cf": 10.0,
+      "w_l1_add": 5.0,
+      "w_l1_del": 0.5,
+      "w_vgae_recon": 5.0,
+      "w_vgae_kl": 1.0,
+      "enable_fs_feature_recon": false,
+      "w_vgae_feat_recon": 1.0,
+      "w_proto": 0.0,
+      "cf_margin": 0.5,
+      "lambda_cf_margin": 1.0
+    },
+    "nci1": {
+      "w_cf": 10.0,
+      "w_l1_add": 5.0,
+      "w_l1_del": 0.5,
+      "w_vgae_recon": 5.0,
+      "w_vgae_kl": 1.0,
+      "enable_fs_feature_recon": false,
+      "w_vgae_feat_recon": 1.0,
+      "w_proto": 0.0,
+      "cf_margin": 0.5,
+      "lambda_cf_margin": 1.0
+    },
+    "bbbp": {
+      "w_cf": 10.0,
+      "w_l1_add": 5.0,
+      "w_l1_del": 0.5,
+      "w_vgae_recon": 5.0,
+      "w_vgae_kl": 1.0,
+      "enable_fs_feature_recon": false,
+      "w_vgae_feat_recon": 1.0,
+      "w_proto": 0.0,
+      "cf_margin": 0.5,
+      "lambda_cf_margin": 1.0
+    },
+    "benzene": {
+      "w_cf": 10.0,
+      "w_l1_add": 5.0,
+      "w_l1_del": 0.5,
+      "w_vgae_recon": 5.0,
+      "w_vgae_kl": 1.0,
+      "enable_fs_feature_recon": false,
+      "w_vgae_feat_recon": 1.0,
+      "w_proto": 0.0,
+      "cf_margin": 0.5,
+      "lambda_cf_margin": 1.0
+    },
+    "alkane_carbonyl": {
+      "w_cf": 10.0,
+      "w_l1_add": 5.0,
+      "w_l1_del": 0.5,
+      "w_vgae_recon": 5.0,
+      "w_vgae_kl": 1.0,
+      "enable_fs_feature_recon": false,
+      "w_vgae_feat_recon": 1.0,
+      "w_proto": 0.0,
+      "cf_margin": 0.5,
+      "lambda_cf_margin": 1.0
+    },
+    "fluoride_carbonyl": {
+      "w_cf": 10.0,
+      "w_l1_add": 5.0,
+      "w_l1_del": 0.5,
+      "w_vgae_recon": 5.0,
+      "w_vgae_kl": 1.0,
+      "enable_fs_feature_recon": false,
+      "w_vgae_feat_recon": 1.0,
+      "w_proto": 0.0,
+      "cf_margin": 0.5,
+      "lambda_cf_margin": 1.0
+    },
+    "proteins": {
+      "w_cf": 10.0,
+      "w_l1_add": 5.0,
+      "w_l1_del": 0.5,
+      "w_vgae_recon": 5.0,
+      "w_vgae_kl": 1.0,
+      "enable_fs_feature_recon": false,
+      "w_vgae_feat_recon": 1.0,
+      "w_proto": 0.0,
+      "cf_margin": 0.5,
+      "lambda_cf_margin": 1.0
+    }
+  }
+}

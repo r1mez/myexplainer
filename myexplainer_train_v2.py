@@ -11,6 +11,7 @@ from torch_geometric.loader import DataLoader
 from evaluationV2 import evaluate
 from models.myexplainerV2 import MyExplainerV2
 from utils import get_datasets, train_collate_fn
+from utils.loss_hparams import LOSS_HPARAM_KEYS, apply_loss_hparams
 from utils.pair_data import MappedDataset
 from utils.subgraph_method import subgraph_mining
 from utils.train_myexplainer import train_myexplainerV2
@@ -148,7 +149,7 @@ def parse_args():
 
     # 基础设置
     parser.add_argument('--cuda', type=int, default=0, help='GPU device')
-    parser.add_argument('--dataset', type=str, default='nci1', help='Dataset name')
+    parser.add_argument('--dataset', type=str, default='mutag', help='Dataset name')
     parser.add_argument('--gnn_path', type=str, default='param/', help='GNN directory')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use (cpu or cuda)')
     parser.add_argument('--train_mode',type=bool,default=True,help='Current mode')
@@ -179,7 +180,12 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
-    parser.add_argument('--w_proto', type=float, default=1.0, help='Prototype alignment loss weight')
+    parser.add_argument(
+        '--loss_config_path',
+        type=str,
+        default=None,
+        help='Path to dataset-specific loss hyperparameter JSON config'
+    )
     parser.add_argument('--proto_topk', type=int, default=100, help='Top-K discriminative pattern families per class')
     parser.add_argument('--proto_refresh_every', type=int, default=5, help='Refresh prototypes every N epochs')
     parser.add_argument('--pattern_family_min_count', type=int, default=2,
@@ -194,14 +200,19 @@ def parse_args():
 
 def main():
     args = parse_args()
+    args.dataset = args.dataset.lower()
+    apply_loss_hparams(args)
 
     # 设置设备为torch.device对象
     args.device = torch.device(f'cuda:{args.cuda}' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {args.device}")
+    print("Loss hyperparameters:")
+    for key in LOSS_HPARAM_KEYS:
+        print(f"  {key}: {getattr(args, key)}")
 
     # 加载数据集
     print("\n1. Loading datasets...")
-    train_dataset, val_dataset, test_dataset = get_datasets(name=args.dataset.lower())
+    train_dataset, val_dataset, test_dataset = get_datasets(name=args.dataset)
     args.x_dim = train_dataset[0].x.shape[1]
     args.edge_attr_dim = train_dataset[0].edge_attr.shape[1] if train_dataset[0].edge_attr is not None else 0
     args.num_classes = 2
@@ -262,19 +273,19 @@ def main():
     train_loader_masked = TorchDataLoader(
         train_dataset_with_masks,
         batch_size=args.batch_size,
-        shuffle=False,
+        shuffle=True,
         collate_fn=train_collate_fn
     )
     test_loader_masked = TorchDataLoader(
         test_dataset_with_masks,
         batch_size=args.batch_size,
-        shuffle=False,
+        shuffle=True,
         collate_fn=train_collate_fn
     )
     val_loader_masked = TorchDataLoader(
         val_dataset_with_masks,
         batch_size=args.batch_size,
-        shuffle=False,
+        shuffle=True,
         collate_fn=train_collate_fn
     )
     print(f"  Batch size: {args.batch_size}")

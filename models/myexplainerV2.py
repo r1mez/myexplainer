@@ -50,8 +50,12 @@ class AddVGAENet(nn.Module):
 
     def __init__(self, h_dim, z_dim):
         super().__init__()
-        self.encoder_mu = nn.Linear(h_dim, z_dim)
-        self.encoder_logvar = nn.Linear(h_dim, z_dim)
+        if z_dim < 2:
+            raise ValueError(f"Conditional AddVGAENet requires z_dim >= 2, got {z_dim}.")
+        self.latent_dim = z_dim
+        self.stochastic_dim = z_dim - 1
+        self.encoder_mu = nn.Linear(h_dim, self.stochastic_dim)
+        self.encoder_logvar = nn.Linear(h_dim, self.stochastic_dim)
 
     def reparameterize(self, mu, logvar):
         if self.training:
@@ -61,14 +65,28 @@ class AddVGAENet(nn.Module):
         else:
             return mu
 
-    def forward(self, h):
+    def forward(self, h, cond_labels):
         """
         输入: 子图节点特征 h [N_sub, h_dim]
         输出: 重构概率矩阵 prob_adj [N_sub, N_sub], mu, logvar
         """
+        cond_labels = torch.as_tensor(cond_labels, dtype=h.dtype, device=h.device)
+        if cond_labels.dim() == 1:
+            cond_labels = cond_labels.unsqueeze(-1)
+        elif cond_labels.dim() != 2 or cond_labels.size(-1) != 1:
+            raise ValueError(
+                f"cond_labels must have shape [N_sub] or [N_sub, 1], got {tuple(cond_labels.shape)}."
+            )
+
+        if cond_labels.size(0) != h.size(0):
+            raise ValueError(
+                f"cond_labels must align with h on the node dimension, got {cond_labels.size(0)} vs {h.size(0)}."
+            )
+
         mu = self.encoder_mu(h)
         logvar = self.encoder_logvar(h)
-        z = self.reparameterize(mu, logvar)
+        z_base = self.reparameterize(mu, logvar)
+        z = torch.cat([z_base, cond_labels], dim=-1)
         logits = torch.matmul(z, z.t())
         prob_adj = torch.sigmoid(logits)
         return prob_adj, logits, mu, logvar
@@ -94,7 +112,7 @@ class MyExplainerV2(nn.Module):
 
     # ================= 核心逻辑：Pipeline =================
 
-    def forward(self, graphs, subgraphs=None, use_subgraph_gt=True, max_cand_per_graph=15):
+    def forward(self, graphs, subgraphs=None, cond_labels=None, use_subgraph_gt=True, max_cand_per_graph=15):
         x, edge_index, batch = graphs.x, graphs.edge_index, graphs.batch
         N = x.size(0)
 
@@ -108,8 +126,9 @@ class MyExplainerV2(nn.Module):
         p_keep, logit_keep = self.delete_net(node_rep, edge_index)
 
         # Step 4: AddVGAE only manages candidate additions inside FS.
+        cond_labels = self._prepare_cond_labels(cond_labels, batch)
         add_results = self._sample_add_candidates(
-            node_rep, edge_index, batch, fs_nodes_bool, max_cand_per_graph
+            node_rep, edge_index, batch, fs_nodes_bool, cond_labels, max_cand_per_graph
         )
         cand_src, cand_dst, p_add = add_results['src'], add_results['dst'], add_results['probs']
 
@@ -175,6 +194,31 @@ class MyExplainerV2(nn.Module):
                 fs_nodes_bool[global_idx] = True
 
         return fs_nodes_bool
+
+    def _prepare_cond_labels(self, cond_labels, batch):
+        if cond_labels is None:
+            raise ValueError("cond_labels must be provided for conditional AddVGAE.")
+
+        cond_labels = torch.as_tensor(cond_labels, device=self.device)
+        if cond_labels.dim() == 2 and cond_labels.size(-1) == 1:
+            cond_labels = cond_labels.reshape(-1)
+        elif cond_labels.dim() != 1:
+            raise ValueError(
+                f"cond_labels must have shape [B] or [B, 1], got {tuple(cond_labels.shape)}."
+            )
+
+        B = int(batch.max().item()) + 1 if batch.numel() > 0 else 0
+        if cond_labels.numel() != B:
+            raise ValueError(
+                f"cond_labels must provide one label per graph, got {cond_labels.numel()} labels for {B} graphs."
+            )
+
+        cond_labels = cond_labels.to(dtype=torch.float)
+        valid_mask = (cond_labels == 0) | (cond_labels == 1)
+        if not valid_mask.all().item():
+            raise ValueError("Conditional AddVGAE currently expects binary labels encoded as 0/1.")
+
+        return cond_labels
 
     def _get_prototype_graphs_for_class(self, prototype_bank, class_idx):
         if prototype_bank is None:
@@ -319,7 +363,7 @@ class MyExplainerV2(nn.Module):
         graph_ids = torch.tensor(graph_ids, dtype=torch.long, device=device)
         return fs_embed, graph_ids
 
-    def _sample_add_candidates_legacy(self, node_rep, edge_index, batch, fs_nodes_bool, max_cand):
+    def _sample_add_candidates_legacy(self, node_rep, edge_index, batch, fs_nodes_bool, cond_labels, max_cand):
         """
         运行 VGAE 并根据策略筛选候选边
         """
@@ -348,7 +392,9 @@ class MyExplainerV2(nn.Module):
             A_g = adj_global[fs_idx_g][:, fs_idx_g]  # 子邻接矩阵
 
             # 2. VGAE Forward
-            prob_A, _, mu, logvar = self.add_net(h_g)
+            graph_cond = (2.0 * cond_labels[g].to(dtype=h_g.dtype)) - 1.0
+            cond_node = graph_cond.view(1, 1).expand(fs_idx_g.size(0), 1)
+            prob_A, _, mu, logvar = self.add_net(h_g, cond_node)
 
             # 3. 计算 Loss (Recon + KL)
             recon_loss_g = self._compute_vgae_recon_loss(prob_A, A_g)
@@ -387,9 +433,9 @@ class MyExplainerV2(nn.Module):
             'kl_loss': torch.stack(kl_losses).mean() if kl_losses else torch.tensor(0.0, device=device)
         }
 
-    def _sample_add_candidates(self, node_rep, edge_index, batch, fs_nodes_bool, max_cand):
+    def _sample_add_candidates(self, node_rep, edge_index, batch, fs_nodes_bool, cond_labels, max_cand):
         return self._sample_add_candidates_legacy(
-            node_rep, edge_index, batch, fs_nodes_bool, max_cand
+            node_rep, edge_index, batch, fs_nodes_bool, cond_labels, max_cand
         )
 
     def _compute_vgae_recon_loss(self, prob_A, target_A):
@@ -455,6 +501,14 @@ class MyExplainerV2(nn.Module):
         return self._build_cf_graph_legacy(edge_index, p_keep, cand_src, cand_dst, p_add)
 
     # ================= Loss 璁＄畻 =================
+    def _get_loss_hparam(self, args, name):
+        if not hasattr(args, name):
+            raise AttributeError(
+                f"Missing loss hyperparameter '{name}'. "
+                "Call apply_loss_hparams(args) before training/evaluation."
+            )
+        return getattr(args, name)
+
     def _compute_proto_loss(self, outputs, y_target):
         cf_fs_embed = outputs.get("cf_fs_embed")
         cf_fs_graph_ids = outputs.get("cf_fs_graph_ids")
@@ -499,15 +553,21 @@ class MyExplainerV2(nn.Module):
         recon_loss = outputs["add_recon_loss"]
         kl_loss = outputs["add_kl_loss"]
         proto_loss = self._compute_proto_loss(outputs, y_target)
+        w_cf = self._get_loss_hparam(args, "w_cf")
+        w_l1_add = self._get_loss_hparam(args, "w_l1_add")
+        w_l1_del = self._get_loss_hparam(args, "w_l1_del")
+        w_vgae_recon = self._get_loss_hparam(args, "w_vgae_recon")
+        w_vgae_kl = self._get_loss_hparam(args, "w_vgae_kl")
+        w_proto = self._get_loss_hparam(args, "w_proto")
 
         # 总损失聚合
         total_loss = (
-                getattr(args, "w_cf", 10.0) * cf_loss +
-                getattr(args, "w_l1_add", 10.0) * l1_add +
-                getattr(args, "w_l1_del", 5) * l1_del +
-                getattr(args, "w_vgae_recon", 5.0) * recon_loss +
-                getattr(args, "w_vgae_kl", 1.0) * kl_loss +
-                getattr(args, "w_proto", 0.1) * proto_loss
+                w_cf * cf_loss +
+                w_l1_add * l1_add +
+                w_l1_del * l1_del +
+                w_vgae_recon * recon_loss +
+                w_vgae_kl * kl_loss +
+                w_proto * proto_loss
         )
 
         # 4. (Optional) Budget Loss - 如有需要可在此处恢复
@@ -530,76 +590,8 @@ class MyExplainerV2(nn.Module):
         logits_t = logits[idx, y_target]
         logits_o = logits[idx, 1 - y_target]  # 假设是二分类，多分类需修改取最大非target逻辑
 
-        margin = getattr(args, "cf_margin", 0.5)
+        margin = self._get_loss_hparam(args, "cf_margin")
         margin_loss = F.relu(margin + logits_o - logits_t).mean()
 
-        lambda_margin = getattr(args, "lambda_cf_margin", 1.0)
+        lambda_margin = self._get_loss_hparam(args, "lambda_cf_margin")
         return ce_loss + lambda_margin * margin_loss
-
-
-
-
-
-
-class FrequentSubgraphMiner(nn.Module):
-    def __init__(self, node_emb_dim):
-        super(FrequentSubgraphMiner, self).__init__()
-        self.node_emb_dim = node_emb_dim
-        self.mlp_mask = nn.Sequential(
-            nn.Linear(self.node_emb_dim, self.node_emb_dim * 2),
-            nn.ReLU(),
-            nn.Linear(self.node_emb_dim * 2, 1)
-        )
-
-    def forward(self, x):
-        return self.mlp_mask(x)
-
-
-
-class DenseGATConv(nn.Module):
-    def __init__(self, in_channels, out_channels, edge_attr_dim, aggr='add', bias=True):
-        super(DenseGATConv, self).__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.edge_attr_dim = edge_attr_dim
-        self.aggr = aggr
-        # Linear transformations for node features
-        self.lin_rel = nn.Linear(in_channels, out_channels, bias=bias)
-        self.lin_root = nn.Linear(in_channels, out_channels, bias=False)
-
-        # Additional transformation for edge attributes
-        self.lin_edge = nn.Linear(edge_attr_dim, 1, bias=False)
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        self.lin_rel.reset_parameters()
-        self.lin_root.reset_parameters()
-        self.lin_edge.reset_parameters()
-
-    def forward(self, x, adj, edge_attr, mask=None):
-        B, N, _ = x.size()
-        # Expand edge attributes to match the adjacency matrix
-        full_edge_attr = torch.zeros(B, N, N, self.edge_attr_dim, device=edge_attr.device)
-        tril_indices = torch.tril_indices(N, N, offset=-1)
-        full_edge_attr[:, tril_indices[0], tril_indices[1]] = edge_attr
-        full_edge_attr[:, tril_indices[1], tril_indices[0]] = edge_attr
-        # Transform edge attributes
-        edge_attr_transformed = self.lin_edge(full_edge_attr).squeeze(-1)  # Shape: [B, N, N]
-
-        # Modify adjacency matrix with edge attributes
-        edge_adj = adj * edge_attr_transformed  # Shape: [B, N, N]
-
-        # Perform graph convolution
-        out = torch.matmul(edge_adj, x)  # Shape: [B, N, out_channels]
-        if self.aggr == 'mean':
-            out = out / edge_adj.sum(dim=-1, keepdim=True).clamp_(min=1)
-        out = self.lin_rel(out)
-        out += self.lin_root(x)
-        if mask is not None:
-            out = out * mask.view(B, N, 1).to(x.dtype)
-        return out
-
-    def __repr__(self):
-        return (f'{self.__class__.__name__}({self.in_channels}, '
-                f'{self.out_channels}, edge_attr_dim={self.edge_attr_dim})')
