@@ -820,9 +820,9 @@ def evaluate_rsgg_ce(
 
 
 if __name__ == "__main__":
-    dataset_name = os.environ.get("MYEXPLAINER_DATASET", "mutag")
-    epochs = int(os.environ.get("RSGG_CE_EPOCHS", "100"))
-    lr = float(os.environ.get("RSGG_CE_LR", "0.0001"))
+    dataset_name = os.environ.get("MYEXPLAINER_DATASET", "alkane_carbonyl")
+    epochs = int(os.environ.get("RSGG_CE_EPOCHS", "1000"))
+    lr = float(os.environ.get("RSGG_CE_LR", "0.001"))
     sampling_iterations = int(os.environ.get("RSGG_CE_SAMPLING_ITERATIONS", "500"))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -840,25 +840,16 @@ if __name__ == "__main__":
     pred_model.eval()
     print("GNN classifier loaded.")
 
-    explainer_path = _resolve_project_path(
-        "param",
-        "explainers",
-        f"{dataset_name}_rsgg_ce.pt",
+    print("Training RSGG-CE explainer from scratch (checkpoint saving disabled).")
+    explainer = train_rsgg_ce(
+        pred_model=pred_model,
+        train_dataset=train_dataset,
+        epochs=epochs,
+        device=device,
+        lr=lr,
+        model_path=None,
+        sampling_iterations=sampling_iterations,
     )
-
-    if os.path.exists(explainer_path) and os.environ.get("RSGG_CE_RETRAIN", "0") != "1":
-        print(f"Loading RSGG-CE explainer from {explainer_path}")
-        explainer = load_rsgg_ce(explainer_path, map_location=device)
-    else:
-        explainer = train_rsgg_ce(
-            pred_model=pred_model,
-            train_dataset=train_dataset,
-            epochs=epochs,
-            device=device,
-            lr=lr,
-            model_path=explainer_path,
-            sampling_iterations=sampling_iterations,
-        )
 
     metrics = evaluate_rsgg_ce(
         pred_model=pred_model,
