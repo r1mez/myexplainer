@@ -1,5 +1,6 @@
 import os
 import pickle
+from functools import lru_cache
 
 import numpy as np
 import networkx as nx
@@ -9,15 +10,41 @@ from torch.distributions import Categorical
 from torch_geometric.utils import to_networkx
 import igraph as ig
 
+from graph_editor.metadata import feature_labels_for_dataset, normalize_dataset_name
+
 
 DATASET_SUBGRAPH_SAMPLE_THRESHOLDS = {
     "ba2motif": 0.97,
     "mutag": 0.70,
+    "mutag188": 0.80,
+    "benzene": 0.70,
     "proteins": 0.70,
     "alkane_carbonyl": 0.70,
     "fluoride_carbonyl": 0.70,
-    "nci1": 0.70,
+    "nci1": 0.15,
 }
+
+
+@lru_cache(maxsize=None)
+def _dataset_node_type_labels(dataset_name, num_node_features):
+    dataset_key = normalize_dataset_name(dataset_name or "")
+    if dataset_key == "__legacy_proteins_branch__":
+        dataset_key = "proteins"
+    labels = feature_labels_for_dataset(dataset_key, int(num_node_features), "onehot")
+
+    if dataset_key == "nci1":
+        return tuple(f"T{idx + 1}" for idx in range(int(num_node_features)))
+    if dataset_key == "proteins":
+        return tuple(f"P{idx}" for idx in range(int(num_node_features)))
+
+    return tuple(str(label) for label in labels)
+
+
+def _pattern_node_label(dataset_name, feat_idx, num_node_features):
+    labels = _dataset_node_type_labels(dataset_name, num_node_features)
+    if 0 <= feat_idx < len(labels):
+        return labels[feat_idx]
+    return str(feat_idx)
 
 
 def _infer_node_color(node_attrs) -> int:
@@ -238,7 +265,7 @@ def _resolve_subgraph_sample_threshold(args, dataset_name, historical_default):
     )
 
 
-def _sample_discrete_patterns(class_zero_dataset, class_one_dataset, num_samples, threshold):
+def _sample_discrete_patterns(class_zero_dataset, class_one_dataset, num_samples, threshold, dataset_name=None):
     patterns_0 = []
     patterns_1 = []
 
@@ -261,6 +288,7 @@ def _sample_discrete_patterns(class_zero_dataset, class_one_dataset, num_samples
                 Adj,
                 threshold=threshold,
                 num_node_features=feature_dim,
+                dataset_name=dataset_name,
                 visualize=True,
             )
         )
@@ -274,6 +302,7 @@ def _sample_discrete_patterns(class_zero_dataset, class_one_dataset, num_samples
                 Adj,
                 threshold=threshold,
                 num_node_features=feature_dim,
+                dataset_name=dataset_name,
                 visualize=True,
             )
         )
@@ -317,14 +346,14 @@ def subgraph_mining(args,datasets):
                         threshold=sample_threshold,
                     )
                 )
-        elif dataset_name in {'mutag', 'proteins', 'alkane_carbonyl', 'fluoride_carbonyl'}:
+        elif dataset_name in {'mutag', 'mutag188', 'benzene', 'proteins', 'alkane_carbonyl', 'fluoride_carbonyl'}:
             sample_threshold = _resolve_subgraph_sample_threshold(args, dataset_name, 0.70)
             print(
                 f"  Using subgraph sample threshold {sample_threshold:.2f} "
                 f"for dataset '{dataset_name}'"
             )
             patterns_0, patterns_1 = _sample_discrete_patterns(
-                datasets[0], datasets[1], num_samples=100, threshold=sample_threshold
+                datasets[0], datasets[1], num_samples=100, threshold=sample_threshold, dataset_name=dataset_name
             )
         elif dataset_name == 'nci1':
             sample_threshold = _resolve_subgraph_sample_threshold(args, dataset_name, 0.70)
@@ -333,7 +362,7 @@ def subgraph_mining(args,datasets):
                 f"for dataset '{dataset_name}'"
             )
             patterns_0, patterns_1 = _sample_discrete_patterns(
-                datasets[0], datasets[1], num_samples=10000, threshold=sample_threshold
+                datasets[0], datasets[1], num_samples=10000, threshold=sample_threshold, dataset_name=dataset_name
             )
         elif dataset_name == '__legacy_proteins_branch__':
             sample_threshold = _resolve_subgraph_sample_threshold(args, dataset_name, 0.70)
@@ -356,6 +385,7 @@ def subgraph_mining(args,datasets):
                         Adj,
                         threshold=sample_threshold,
                         num_node_features=nf,
+                        dataset_name=dataset_name,
                     )
                 )
             X, Adj = GraphRepModelDiscrete(datasets[1], N1)
@@ -367,6 +397,7 @@ def subgraph_mining(args,datasets):
                         Adj,
                         threshold=sample_threshold,
                         num_node_features=nf,
+                        dataset_name=dataset_name,
                     )
                 )
         # 对patterns中的所有图按照key1(节点数)和key2(度数)进行排序
@@ -617,7 +648,15 @@ def GraphRepModelDiscrete(targetclass, N=111):
     return X, Adj
 
 
-def graphsamplerDiscrete(N, X, Adj, threshold=0.7, num_node_features=14, visualize=False):
+def graphsamplerDiscrete(
+    N,
+    X,
+    Adj,
+    threshold=0.7,
+    num_node_features=37,
+    dataset_name=None,
+    visualize=False,
+):
     """
     Gen-GraphEx 生成器（通用适配版）
 
@@ -672,8 +711,7 @@ def graphsamplerDiscrete(N, X, Adj, threshold=0.7, num_node_features=14, visuali
         # 安全赋值
         if 0 <= feat_idx < num_node_features:
             one_hot[feat_idx] = 1.0
-            # 既然没有原子映射表，直接显示类型ID
-            label_text = f"{feat_idx}"
+            label_text = _pattern_node_label(dataset_name, feat_idx, num_node_features)
         else:
             raise ValueError(
                 f"Sampled node feature index {feat_idx} is out of range for "
