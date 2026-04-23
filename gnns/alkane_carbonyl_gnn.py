@@ -44,6 +44,14 @@ def parse_args():
     parser.add_argument("--hidden_dim", type=int, default=128, help="Hidden dimension.")
     parser.add_argument("--dropout", type=float, default=0.3, help="Dropout rate.")
     parser.add_argument(
+        "--graph_pooling",
+        type=str,
+        default="mean",
+        choices=["mean", "mean_max"],
+        help="Graph readout for Alkane-Carbonyl training. 'mean' is the new default; "
+             "'mean_max' preserves the previous behavior.",
+    )
+    parser.add_argument(
         "--weight_decay",
         type=float,
         default=5e-4,
@@ -71,12 +79,23 @@ def parse_args():
 
 
 class AlkaneCarbonylGCN(torch.nn.Module):
-    def __init__(self, in_channels, hidden_dim=128, conv_unit=3, dropout=0.3):
+    def __init__(
+        self,
+        in_channels,
+        hidden_dim=128,
+        conv_unit=3,
+        dropout=0.3,
+        graph_pooling="mean_max",
+    ):
         super(AlkaneCarbonylGCN, self).__init__()
         self.convs = ModuleList()
         self.batch_norms = ModuleList()
         self.relus = ModuleList([ReLU() for _ in range(conv_unit)])
         self.dropout = dropout
+        self.graph_pooling = graph_pooling
+
+        if self.graph_pooling not in {"mean", "mean_max"}:
+            raise ValueError(f"Unsupported graph_pooling='{self.graph_pooling}'")
 
         self.convs.append(GCNConv(in_channels=in_channels, out_channels=hidden_dim))
         for _ in range(conv_unit - 2):
@@ -85,8 +104,9 @@ class AlkaneCarbonylGCN(torch.nn.Module):
 
         # Each convolution layer needs its own normalization statistics.
         self.batch_norms.extend([BatchNorm(hidden_dim) for _ in range(conv_unit)])
+        pool_out_dim = hidden_dim if self.graph_pooling == "mean" else hidden_dim * 2
         self.ffn = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(pool_out_dim, hidden_dim),
             ReLU(),
             nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, 2),
@@ -109,7 +129,12 @@ class AlkaneCarbonylGCN(torch.nn.Module):
         return x
 
     def _pool_graph(self, x, batch):
+        graph_pooling = getattr(self, "graph_pooling", "mean_max")
         mean_pool = global_mean_pool(x, batch)
+        if graph_pooling == "mean":
+            return mean_pool
+        if graph_pooling != "mean_max":
+            raise ValueError(f"Unsupported graph_pooling='{graph_pooling}'")
         max_pool = global_max_pool(x, batch)
         return torch.cat([mean_pool, max_pool], dim=1)
 
@@ -177,6 +202,7 @@ if __name__ == "__main__":
         hidden_dim=args.hidden_dim,
         conv_unit=args.num_unit,
         dropout=args.dropout,
+        graph_pooling=args.graph_pooling,
     ).to(device)
 
     class_counts, class_weights = get_class_weights(train_dataset)
