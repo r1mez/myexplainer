@@ -184,7 +184,7 @@ def parse_args():
         '--loss_config_path',
         type=str,
         default=None,
-        help='Path to dataset-specific loss hyperparameter JSON config'
+        help='Path to dataset-specific loss hyperparameter YAML config'
     )
     parser.add_argument('--proto_topk', type=int, default=100, help='Top-K discriminative pattern families per class')
     parser.add_argument('--proto_refresh_every', type=int, default=5, help='Refresh prototypes every N epochs')

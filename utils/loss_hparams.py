@@ -1,5 +1,6 @@
-import json
 from pathlib import Path
+
+from utils.simple_yaml import load_yaml_file
 
 
 LOSS_HPARAM_KEYS = (
@@ -16,7 +17,7 @@ LOSS_HPARAM_KEYS = (
 )
 
 DEFAULT_LOSS_HPARAMS_PATH = (
-    Path(__file__).resolve().parents[1] / "configs" / "loss_hparams.json"
+    Path(__file__).resolve().parents[1] / "configs" / "loss_hparams.yaml"
 )
 
 
@@ -36,12 +37,11 @@ def load_loss_hparams(dataset_name, config_path=None):
     if not path.exists():
         raise FileNotFoundError(f"Loss hyperparameter config not found: {path}")
 
-    with path.open("r", encoding="utf-8") as f:
-        raw_config = json.load(f)
+    raw_config = load_yaml_file(path)
 
     datasets = raw_config.get("datasets")
     if not isinstance(datasets, dict):
-        raise ValueError(f"Loss config must contain a top-level 'datasets' object: {path}")
+        raise ValueError(f"Loss config must contain a top-level 'datasets' mapping: {path}")
 
     if dataset_key not in datasets:
         available = ", ".join(sorted(datasets))

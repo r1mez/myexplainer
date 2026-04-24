@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import json
 import math
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+from utils.simple_yaml import load_yaml_file
 
 
 SUPPORTED_DATASETS = (
@@ -21,7 +22,7 @@ SUPPORTED_DATASETS = (
 
 SUPPORTED_SPLITS = ("training", "evaluation", "testing")
 
-NODE_LABEL_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "node_label_config.json"
+NODE_LABEL_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "node_label_config.yaml"
 
 
 def normalize_dataset_name(dataset: str) -> str:
@@ -38,11 +39,10 @@ def is_supported_split(split: str) -> bool:
 
 @lru_cache(maxsize=1)
 def _load_node_label_config() -> Dict[str, Any]:
-    with NODE_LABEL_CONFIG_PATH.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
+    payload = load_yaml_file(NODE_LABEL_CONFIG_PATH)
 
     if not isinstance(payload, dict):
-        raise ValueError(f"Node label config must be a JSON object: {NODE_LABEL_CONFIG_PATH}")
+        raise ValueError(f"Node label config must be a YAML mapping: {NODE_LABEL_CONFIG_PATH}")
     return payload
 
 
