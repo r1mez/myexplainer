@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import math
+from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 
 SUPPORTED_DATASETS = (
@@ -19,79 +21,7 @@ SUPPORTED_DATASETS = (
 
 SUPPORTED_SPLITS = ("training", "evaluation", "testing")
 
-MUTAG_NODE_LABELS = [
-    "C",
-    "O",
-    "Cl",
-    "H",
-    "N",
-    "F",
-    "Br",
-    "S",
-    "P",
-    "I",
-    "Na",
-    "K",
-    "Li",
-    "Ca",
-]
-
-MUTAG188_NODE_LABELS = [
-    "C",
-    "N",
-    "O",
-    "F",
-    "I",
-    "Cl",
-    "Br",
-]
-
-GRAPHXAI_MOL_ATOM_TYPES = [
-    "C",
-    "N",
-    "O",
-    "S",
-    "F",
-    "P",
-    "Cl",
-    "Br",
-    "Na",
-    "Ca",
-    "I",
-    "B",
-    "H",
-    "*",
-]
-
-BBBP_ATOMIC_NUM_TO_SYMBOL: Dict[int, str] = {
-    1: "H",
-    5: "B",
-    6: "C",
-    7: "N",
-    8: "O",
-    9: "F",
-    11: "Na",
-    15: "P",
-    16: "S",
-    17: "Cl",
-    20: "Ca",
-    35: "Br",
-    53: "I",
-}
-
-BBBP_DEFAULT_ATOMIC_NUM = 6
-
-BBBP_FEATURE_LABELS = [
-    "atomic_num",
-    "chirality",
-    "degree",
-    "formal_charge",
-    "num_hs",
-    "num_radical_electrons",
-    "hybridization",
-    "is_aromatic",
-    "is_in_ring",
-]
+NODE_LABEL_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "node_label_config.json"
 
 
 def normalize_dataset_name(dataset: str) -> str:
@@ -106,8 +36,76 @@ def is_supported_split(split: str) -> bool:
     return str(split).strip().lower() in SUPPORTED_SPLITS
 
 
+@lru_cache(maxsize=1)
+def _load_node_label_config() -> Dict[str, Any]:
+    with NODE_LABEL_CONFIG_PATH.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"Node label config must be a JSON object: {NODE_LABEL_CONFIG_PATH}")
+    return payload
+
+
+def _dataset_config(dataset: str) -> Dict[str, Any]:
+    datasets = _load_node_label_config().get("datasets", {})
+    if not isinstance(datasets, dict):
+        return {}
+
+    dataset_config = datasets.get(normalize_dataset_name(dataset), {})
+    return dataset_config if isinstance(dataset_config, dict) else {}
+
+
+def _config_label_list(value: Any) -> Optional[List[str]]:
+    if not isinstance(value, list):
+        return None
+    return [str(item) for item in value]
+
+
+def _dataset_feature_labels_from_config(dataset: str, x_dim: int, feature_mode: str) -> Optional[List[str]]:
+    config = _dataset_config(dataset)
+    if feature_mode == "onehot":
+        labels = _config_label_list(config.get("onehot_feature_labels"))
+        if labels is not None and len(labels) == x_dim:
+            return labels
+
+    labels = _config_label_list(config.get("feature_labels"))
+    if labels is not None and len(labels) == x_dim:
+        return labels
+
+    return None
+
+
+def _dataset_node_label_mode_override(dataset: str, x_dim: int) -> Optional[str]:
+    config = _dataset_config(dataset)
+    mode = config.get("node_label_mode")
+    if not isinstance(mode, str) or not mode.strip():
+        return None
+
+    min_x_dim = config.get("node_label_min_x_dim", 0)
+    try:
+        min_x_dim = int(min_x_dim)
+    except (TypeError, ValueError):
+        min_x_dim = 0
+
+    return mode if x_dim >= min_x_dim else None
+
+
+def _atomic_num_to_symbol_map(dataset: str) -> Dict[int, str]:
+    raw_mapping = _dataset_config(dataset).get("atomic_num_to_symbol")
+    if not isinstance(raw_mapping, dict):
+        return {}
+
+    mapping = {}
+    for key, value in raw_mapping.items():
+        try:
+            mapping[int(key)] = str(value)
+        except (TypeError, ValueError):
+            continue
+    return mapping
+
+
 def _feature_is_onehot(feature: Sequence[float], tol: float = 1e-4) -> bool:
-    if not feature:
+    if len(feature) == 0:
         return False
 
     total = 0.0
@@ -141,21 +139,17 @@ def infer_feature_mode(features: Iterable[Sequence[float]]) -> str:
 
 def feature_labels_for_dataset(dataset: str, x_dim: int, feature_mode: str) -> List[str]:
     dataset = normalize_dataset_name(dataset)
-    if dataset == "bbbp" and x_dim == len(BBBP_FEATURE_LABELS):
-        return list(BBBP_FEATURE_LABELS)
+    dataset_labels = _dataset_feature_labels_from_config(dataset, int(x_dim), feature_mode)
+    if dataset_labels is not None:
+        return dataset_labels
+
     if feature_mode == "onehot":
-        if dataset == "mutag" and x_dim == len(MUTAG_NODE_LABELS):
-            return list(MUTAG_NODE_LABELS)
-        if dataset == "mutag188" and x_dim == len(MUTAG188_NODE_LABELS):
-            return list(MUTAG188_NODE_LABELS)
-        if dataset in {"benzene", "alkane_carbonyl", "fluoride_carbonyl"} and x_dim == len(GRAPHXAI_MOL_ATOM_TYPES):
-            return list(GRAPHXAI_MOL_ATOM_TYPES)
         return [str(idx) for idx in range(x_dim)]
     return [f"f{idx}" for idx in range(x_dim)]
 
 
 def bbbp_atom_symbol_from_feature(feature: Sequence[float]) -> Optional[str]:
-    if not feature:
+    if len(feature) == 0:
         return None
 
     try:
@@ -163,34 +157,39 @@ def bbbp_atom_symbol_from_feature(feature: Sequence[float]) -> Optional[str]:
     except (TypeError, ValueError, OverflowError):
         return None
 
-    return BBBP_ATOMIC_NUM_TO_SYMBOL.get(atomic_num)
+    return _atomic_num_to_symbol_map("bbbp").get(atomic_num)
 
 
 def node_label_mode_for_dataset(dataset: str, feature_mode: str, x_dim: int) -> str:
     dataset = normalize_dataset_name(dataset)
-    if dataset == "bbbp" and x_dim >= 1:
-        return "atomic_num"
+    override = _dataset_node_label_mode_override(dataset, int(x_dim))
+    if override is not None:
+        return override
     if feature_mode == "onehot":
         return "onehot"
     return "node_id"
 
 
 def atom_type_options_for_dataset(dataset: str) -> List[Dict[str, object]]:
-    dataset = normalize_dataset_name(dataset)
-    if dataset != "bbbp":
+    mapping = _atomic_num_to_symbol_map(dataset)
+    if not mapping:
         return []
 
     return [
         {"value": atomic_num, "label": symbol}
-        for atomic_num, symbol in sorted(BBBP_ATOMIC_NUM_TO_SYMBOL.items())
+        for atomic_num, symbol in sorted(mapping.items())
     ]
 
 
 def default_atom_type_for_dataset(dataset: str) -> Optional[int]:
-    dataset = normalize_dataset_name(dataset)
-    if dataset == "bbbp":
-        return BBBP_DEFAULT_ATOMIC_NUM
-    return None
+    config = _dataset_config(dataset)
+    value = config.get("default_atomic_num")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def infer_node_label(
@@ -200,7 +199,8 @@ def infer_node_label(
     node_id: int,
     dataset: Optional[str] = None,
 ) -> str:
-    if normalize_dataset_name(dataset or "") == "bbbp" and feature:
+    normalized_dataset = normalize_dataset_name(dataset or "")
+    if _dataset_node_label_mode_override(normalized_dataset, len(feature)) == "atomic_num" and len(feature) > 0:
         atom_symbol = bbbp_atom_symbol_from_feature(feature)
         if atom_symbol is not None:
             return atom_symbol
@@ -209,11 +209,40 @@ def infer_node_label(
         except (TypeError, ValueError, OverflowError):
             pass
 
-    if feature_mode == "onehot" and feature:
+    if feature_mode == "onehot" and len(feature) > 0:
         max_idx = max(range(len(feature)), key=lambda idx: float(feature[idx]))
         if 0 <= max_idx < len(feature_labels):
             return str(feature_labels[max_idx])
     return f"n{node_id}"
+
+
+def infer_node_labels_for_dataset(
+    features: Iterable[Sequence[float]],
+    dataset: Optional[str] = None,
+    feature_mode: Optional[str] = None,
+    node_ids: Optional[Iterable[int]] = None,
+) -> List[str]:
+    feature_rows = [list(feature) for feature in features]
+    if not feature_rows:
+        return []
+
+    if feature_mode is None:
+        feature_mode = infer_feature_mode(feature_rows)
+
+    x_dim = len(feature_rows[0])
+    feature_labels = feature_labels_for_dataset(dataset or "", x_dim, feature_mode)
+    resolved_node_ids = list(node_ids) if node_ids is not None else list(range(len(feature_rows)))
+
+    return [
+        infer_node_label(
+            feature,
+            feature_mode,
+            feature_labels,
+            node_id,
+            dataset=dataset,
+        )
+        for node_id, feature in zip(resolved_node_ids, feature_rows)
+    ]
 
 
 def resolve_model_path(

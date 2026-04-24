@@ -149,7 +149,7 @@ def parse_args():
 
     # 基础设置
     parser.add_argument('--cuda', type=int, default=0, help='GPU device')
-    parser.add_argument('--dataset', type=str, default='mutag', help='Dataset name')
+    parser.add_argument('--dataset', type=str, default='alkane_carbonyl', help='Dataset name')
     parser.add_argument('--gnn_path', type=str, default='param/', help='GNN directory')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use (cpu or cuda)')
     parser.add_argument('--train_mode',type=bool,default=True,help='Current mode')
@@ -177,7 +177,7 @@ def parse_args():
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
 
     # 训练参数
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
     parser.add_argument(

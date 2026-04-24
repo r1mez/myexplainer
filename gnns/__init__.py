@@ -4,6 +4,7 @@ from .mutag188_gnn import Mutag188_GCN
 from .nci1_gnn import NCI1GCN
 from .alkane_carbonyl_gnn import AlkaneCarbonylGCN
 from .fluoride_carbonyl_gnn import FluorideCarbonylGCN
+from .model_utils import EdgeWeightedGATConv
 from .bbbp_gnn import BBBP_GCN
 from .ba2motif_gnn import BA2MotifGCN
 from .benzene_gcn import Benzene_GCN
@@ -13,6 +14,7 @@ __all__ = [
     "Mutag188_GCN",
     "NCI1GCN",
     "AlkaneCarbonylGCN",
+    "EdgeWeightedGATConv",
     "FluorideCarbonylGCN",
     "BBBP_GCN",
     "BA2MotifGCN",

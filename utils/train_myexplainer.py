@@ -81,7 +81,12 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
             loss_dict = model.compute_loss(args, origraphs, y_desired, outputs)
 
             if batch_idx in [0,1,2,3,4]:
-                visualize_explainer_graph(origraphs, y_desired, outputs)
+                visualize_explainer_graph(
+                    origraphs,
+                    y_desired,
+                    outputs,
+                    dataset_name=args.dataset,
+                )
 
 
 

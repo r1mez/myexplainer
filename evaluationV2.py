@@ -102,7 +102,12 @@ def evaluate(args, model, gnn, data_loader):
             )
             total_cf_time += time.time() - t0
 
-            visualize_explainer_graph(origraphs, y_desired, outputs)
+            visualize_explainer_graph(
+                origraphs,
+                y_desired,
+                outputs,
+                dataset_name=args.dataset,
+            )
 
             cf_graphs = output_to_batch(origraphs, outputs)
 
