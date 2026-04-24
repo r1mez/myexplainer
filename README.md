@@ -300,11 +300,11 @@ python myexplainer_train_v2.py --dataset ba2motif --train_mode False
 | `--subgraph_method` | `genGraphEx` | 频繁子图生成方法 |
 | `--proto_topk` | `100` | 每个类别用于构造 prototype 的 top-k pattern 数量 |
 | `--proto_refresh_every` | `5` | 每隔多少个 epoch 刷新一次类别 prototype |
-| `--loss_config_path` | `None` | 数据集级 loss 超参数 JSON；不传时使用 `configs/loss_hparams.json` |
+| `--loss_config_path` | `None` | 数据集级 loss 超参数 YAML；不传时使用 `configs/loss_hparams.yaml` |
 
 其中 `--threshold` 用于预测置信度筛选，`--subgraph_sample_threshold` 用于 `subgraph_method.py` 中的子图采样边概率阈值。若未显式传入 `--subgraph_sample_threshold`，当前默认按数据集选择：`ba2motif=0.97`，`mutag/mutag188/proteins/alkane_carbonyl/fluoride_carbonyl=0.70`，`nci1=0.15`。
 
-所有 loss 相关超参数已集中到 `configs/loss_hparams.json`，并按数据集名分开配置。当前每个数据集暂时使用相同的一组值；后续调参时只需要修改对应数据集条目，不需要改模型代码。
+所有 loss 相关超参数已集中到 `configs/loss_hparams.yaml`，并按数据集名分开配置。当前每个数据集暂时使用相同的一组值；后续调参时只需要修改对应数据集条目，不需要改模型代码。
 
 ## 训练流程
 
