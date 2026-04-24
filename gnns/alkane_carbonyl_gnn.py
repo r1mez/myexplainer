@@ -14,10 +14,27 @@ import torch.nn.functional as F
 from torch.nn import ModuleList, ReLU, Softmax
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import BatchNorm, GCNConv, global_max_pool, global_mean_pool
+from torch_geometric.nn import BatchNorm
 
 from datasets.alkane_carbonyl_dataset import AlkaneCarbonyl
 from utils import Gtest, Gtrain, set_seed
+
+try:
+    from .model_utils import (
+        EdgeWeightedGATConv,
+        get_class_weights,
+        get_pool_output_dim,
+        pool_graph_representation,
+        validate_graph_pooling,
+    )
+except ImportError:
+    from gnns.model_utils import (
+        EdgeWeightedGATConv,
+        get_class_weights,
+        get_pool_output_dim,
+        pool_graph_representation,
+        validate_graph_pooling,
+    )
 
 
 def parse_args():
@@ -94,17 +111,40 @@ class AlkaneCarbonylGCN(torch.nn.Module):
         self.dropout = dropout
         self.graph_pooling = graph_pooling
 
-        if self.graph_pooling not in {"mean", "mean_max"}:
-            raise ValueError(f"Unsupported graph_pooling='{self.graph_pooling}'")
+        validate_graph_pooling(self.graph_pooling)
 
-        self.convs.append(GCNConv(in_channels=in_channels, out_channels=hidden_dim))
+        self.convs.append(
+            EdgeWeightedGATConv(
+                in_channels=in_channels,
+                out_channels=hidden_dim,
+                heads=4,
+                concat=False,
+                dropout=dropout,
+            )
+        )
         for _ in range(conv_unit - 2):
-            self.convs.append(GCNConv(in_channels=hidden_dim, out_channels=hidden_dim))
-        self.convs.append(GCNConv(in_channels=hidden_dim, out_channels=hidden_dim))
+            self.convs.append(
+                EdgeWeightedGATConv(
+                    in_channels=hidden_dim,
+                    out_channels=hidden_dim,
+                    heads=4,
+                    concat=False,
+                    dropout=dropout,
+                )
+            )
+        self.convs.append(
+            EdgeWeightedGATConv(
+                in_channels=hidden_dim,
+                out_channels=hidden_dim,
+                heads=4,
+                concat=False,
+                dropout=dropout,
+            )
+        )
 
         # Each convolution layer needs its own normalization statistics.
         self.batch_norms.extend([BatchNorm(hidden_dim) for _ in range(conv_unit)])
-        pool_out_dim = hidden_dim if self.graph_pooling == "mean" else hidden_dim * 2
+        pool_out_dim = get_pool_output_dim(hidden_dim, self.graph_pooling)
         self.ffn = nn.Sequential(
             nn.Linear(pool_out_dim, hidden_dim),
             ReLU(),
@@ -114,9 +154,6 @@ class AlkaneCarbonylGCN(torch.nn.Module):
         self.softmax = Softmax(dim=1)
 
     def _encode_nodes(self, x, edge_index, edge_weight=None):
-        if edge_weight is None:
-            edge_weight = torch.ones((edge_index.size(1),), device=edge_index.device)
-
         for layer_idx, (conv, batch_norm, relu) in enumerate(zip(self.convs, self.batch_norms, self.relus)):
             residual = x
             x = conv(x, edge_index, edge_weight)
@@ -129,14 +166,7 @@ class AlkaneCarbonylGCN(torch.nn.Module):
         return x
 
     def _pool_graph(self, x, batch):
-        graph_pooling = getattr(self, "graph_pooling", "mean_max")
-        mean_pool = global_mean_pool(x, batch)
-        if graph_pooling == "mean":
-            return mean_pool
-        if graph_pooling != "mean_max":
-            raise ValueError(f"Unsupported graph_pooling='{graph_pooling}'")
-        max_pool = global_max_pool(x, batch)
-        return torch.cat([mean_pool, max_pool], dim=1)
+        return pool_graph_representation(x, batch, getattr(self, "graph_pooling", "mean_max"))
 
     def forward(self, x, edge_index, batch):
         x = self._encode_nodes(x, edge_index)
@@ -170,13 +200,6 @@ class AlkaneCarbonylGCN(torch.nn.Module):
         with torch.no_grad():
             for param in self.parameters():
                 param.uniform_(-1.0, 1.0)
-
-
-def get_class_weights(dataset):
-    labels = torch.tensor([int(graph.y.item()) for graph in dataset], dtype=torch.long)
-    class_counts = torch.bincount(labels, minlength=2).float()
-    class_weights = class_counts.sum() / (class_counts.numel() * class_counts.clamp_min(1.0))
-    return class_counts.long(), class_weights
 
 
 if __name__ == "__main__":

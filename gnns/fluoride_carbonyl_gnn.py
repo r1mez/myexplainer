@@ -9,16 +9,29 @@ sys.path.append("..")
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn import ModuleList, ReLU, Softmax
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
+from torch_geometric.nn import BatchNorm
 
 from datasets.fluoride_carbonyl_dataset import FluorideCarbonyl
 from utils import Gtest, Gtrain, set_seed
 
 try:
-    from .alkane_carbonyl_gnn import AlkaneCarbonylGCN, get_class_weights
+    from .model_utils import (
+        EdgeWeightedGATConv,
+        get_pool_output_dim,
+        pool_graph_representation,
+        validate_graph_pooling,
+    )
 except ImportError:
-    from alkane_carbonyl_gnn import AlkaneCarbonylGCN, get_class_weights
+    from gnns.model_utils import (
+        EdgeWeightedGATConv,
+        get_pool_output_dim,
+        pool_graph_representation,
+        validate_graph_pooling,
+    )
 
 
 def parse_args():
@@ -45,6 +58,14 @@ def parse_args():
     parser.add_argument("--hidden_dim", type=int, default=128, help="Hidden dimension.")
     parser.add_argument("--dropout", type=float, default=0.3, help="Dropout rate.")
     parser.add_argument(
+        "--graph_pooling",
+        type=str,
+        default="mean",
+        choices=["mean", "mean_max"],
+        help="Graph readout for Fluoride-Carbonyl training. 'mean' is the new default; "
+             "'mean_max' preserves the previous behavior.",
+    )
+    parser.add_argument(
         "--weight_decay",
         type=float,
         default=5e-4,
@@ -65,8 +86,110 @@ def parse_args():
     return parser.parse_args()
 
 
-class FluorideCarbonylGCN(AlkaneCarbonylGCN):
-    pass
+class FluorideCarbonylGCN(torch.nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        hidden_dim=128,
+        conv_unit=3,
+        dropout=0.3,
+        graph_pooling="mean_max",
+    ):
+        super(FluorideCarbonylGCN, self).__init__()
+        self.convs = ModuleList()
+        self.batch_norms = ModuleList()
+        self.relus = ModuleList([ReLU() for _ in range(conv_unit)])
+        self.dropout = dropout
+        self.graph_pooling = graph_pooling
+
+        validate_graph_pooling(self.graph_pooling)
+
+        self.convs.append(
+            EdgeWeightedGATConv(
+                in_channels=in_channels,
+                out_channels=hidden_dim,
+                heads=4,
+                concat=False,
+                dropout=dropout,
+            )
+        )
+        for _ in range(conv_unit - 2):
+            self.convs.append(
+                EdgeWeightedGATConv(
+                    in_channels=hidden_dim,
+                    out_channels=hidden_dim,
+                    heads=4,
+                    concat=False,
+                    dropout=dropout,
+                )
+            )
+        self.convs.append(
+            EdgeWeightedGATConv(
+                in_channels=hidden_dim,
+                out_channels=hidden_dim,
+                heads=4,
+                concat=False,
+                dropout=dropout,
+            )
+        )
+
+        self.batch_norms.extend([BatchNorm(hidden_dim) for _ in range(conv_unit)])
+        pool_out_dim = get_pool_output_dim(hidden_dim, self.graph_pooling)
+        self.ffn = nn.Sequential(
+            nn.Linear(pool_out_dim, hidden_dim),
+            ReLU(),
+            nn.Dropout(p=dropout),
+            nn.Linear(hidden_dim, 2),
+        )
+        self.softmax = Softmax(dim=1)
+
+    def _encode_nodes(self, x, edge_index, edge_weight=None):
+        for layer_idx, (conv, batch_norm, relu) in enumerate(zip(self.convs, self.batch_norms, self.relus)):
+            residual = x
+            x = conv(x, edge_index, edge_weight)
+            x = batch_norm(x)
+            x = relu(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+            if layer_idx > 0:
+                x = x + residual
+
+        return x
+
+    def _pool_graph(self, x, batch):
+        return pool_graph_representation(x, batch, getattr(self, "graph_pooling", "mean_max"))
+
+    def forward(self, x, edge_index, batch):
+        x = self._encode_nodes(x, edge_index)
+        graph_x = self._pool_graph(x, batch)
+        pred = self.ffn(graph_x)
+        self.readout = self.softmax(pred)
+        return pred
+
+    def get_node_reps(self, x, edge_index):
+        return self._encode_nodes(x, edge_index)
+
+    def get_graph_rep(self, x, edge_index, batch):
+        node_x = self.get_node_reps(x, edge_index)
+        graph_x = self._pool_graph(node_x, batch)
+        return graph_x
+
+    def get_pred(self, x, edge_index, batch):
+        graph_x = self.get_graph_rep(x, edge_index, batch)
+        pred = self.ffn(graph_x)
+        self.readout = self.softmax(pred)
+        return self.readout, pred
+
+    def get_pred_explain(self, x, edge_index, edge_mask, batch):
+        x = self._encode_nodes(x, edge_index, edge_weight=edge_mask)
+        graph_x = self._pool_graph(x, batch)
+        pred = self.ffn(graph_x)
+        self.readout = self.softmax(pred)
+        return self.readout, pred
+
+    def reset_parameters(self):
+        with torch.no_grad():
+            for param in self.parameters():
+                param.uniform_(-1.0, 1.0)
 
 
 if __name__ == "__main__":
@@ -87,19 +210,19 @@ if __name__ == "__main__":
         hidden_dim=args.hidden_dim,
         conv_unit=args.num_unit,
         dropout=args.dropout,
+        graph_pooling=args.graph_pooling,
     ).to(device)
 
-    class_counts, class_weights = get_class_weights(train_dataset)
+    train_labels = torch.tensor([int(data.y.item()) for data in train_dataset], dtype=torch.long)
+    class_counts = torch.bincount(train_labels, minlength=2)
     print(
-        "Training label distribution: class 0 = {}, class 1 = {}, class weights = [{:.4f}, {:.4f}]".format(
+        "Training label distribution: class 0 = {}, class 1 = {}".format(
             int(class_counts[0]),
             int(class_counts[1]),
-            float(class_weights[0]),
-            float(class_weights[1]),
         )
     )
 
-    criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
+    criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = ReduceLROnPlateau(
         optimizer,
