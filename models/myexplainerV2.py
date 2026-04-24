@@ -53,9 +53,16 @@ class AddVGAENet(nn.Module):
         if z_dim < 2:
             raise ValueError(f"Conditional AddVGAENet requires z_dim >= 2, got {z_dim}.")
         self.latent_dim = z_dim
+        # Preserve the old stochastic latent size; inject class information in the decoder.
         self.stochastic_dim = z_dim - 1
         self.encoder_mu = nn.Linear(h_dim, self.stochastic_dim)
         self.encoder_logvar = nn.Linear(h_dim, self.stochastic_dim)
+        self.label_embedding = nn.Embedding(2, self.stochastic_dim)
+        self.decoder = nn.Sequential(
+            nn.Linear(4 * self.stochastic_dim, h_dim),
+            nn.ReLU(),
+            nn.Linear(h_dim, 1),
+        )
 
     def reparameterize(self, mu, logvar):
         if self.training:
@@ -70,24 +77,55 @@ class AddVGAENet(nn.Module):
         输入: 子图节点特征 h [N_sub, h_dim]
         输出: 重构概率矩阵 prob_adj [N_sub, N_sub], mu, logvar
         """
-        cond_labels = torch.as_tensor(cond_labels, dtype=h.dtype, device=h.device)
-        if cond_labels.dim() == 1:
-            cond_labels = cond_labels.unsqueeze(-1)
-        elif cond_labels.dim() != 2 or cond_labels.size(-1) != 1:
+        cond_labels = torch.as_tensor(cond_labels, device=h.device)
+        if cond_labels.dim() == 0:
+            cond_labels = cond_labels.view(1)
+        elif cond_labels.dim() == 2 and cond_labels.size(-1) == 1:
+            cond_labels = cond_labels.reshape(-1)
+        elif cond_labels.dim() != 1:
             raise ValueError(
-                f"cond_labels must have shape [N_sub] or [N_sub, 1], got {tuple(cond_labels.shape)}."
+                f"cond_labels must have shape [N_sub], [N_sub, 1], or scalar, got {tuple(cond_labels.shape)}."
             )
+
+        if cond_labels.numel() == 1:
+            cond_labels = cond_labels.expand(h.size(0))
 
         if cond_labels.size(0) != h.size(0):
             raise ValueError(
                 f"cond_labels must align with h on the node dimension, got {cond_labels.size(0)} vs {h.size(0)}."
             )
 
+        cond_labels = cond_labels.to(dtype=torch.long)
+        valid_mask = (cond_labels == 0) | (cond_labels == 1)
+        if not valid_mask.all().item():
+            raise ValueError("Conditional AddVGAENet expects binary labels encoded as 0/1.")
+
+        graph_cond = cond_labels[0]
+        if not torch.all(cond_labels == graph_cond).item():
+            raise ValueError(
+                "Conditional AddVGAENet expects one graph-level label broadcast to all FS nodes."
+            )
+
         mu = self.encoder_mu(h)
         logvar = self.encoder_logvar(h)
-        z_base = self.reparameterize(mu, logvar)
-        z = torch.cat([z_base, cond_labels], dim=-1)
-        logits = torch.matmul(z, z.t())
+        z = self.reparameterize(mu, logvar)
+
+        cond_embed = self.label_embedding(graph_cond).to(dtype=h.dtype)
+        num_nodes = z.size(0)
+        z_i = z.unsqueeze(1).expand(num_nodes, num_nodes, -1)
+        z_j = z.unsqueeze(0).expand(num_nodes, num_nodes, -1)
+        cond_pair = cond_embed.view(1, 1, -1).expand(num_nodes, num_nodes, -1)
+        pair_feat = torch.cat(
+            [
+                z_i + z_j,
+                torch.abs(z_i - z_j),
+                z_i * z_j,
+                cond_pair,
+            ],
+            dim=-1,
+        )
+        logits = self.decoder(pair_feat).squeeze(-1)
+        logits = 0.5 * (logits + logits.transpose(0, 1))
         prob_adj = torch.sigmoid(logits)
         return prob_adj, logits, mu, logvar
 
@@ -392,7 +430,7 @@ class MyExplainerV2(nn.Module):
             A_g = adj_global[fs_idx_g][:, fs_idx_g]  # 子邻接矩阵
 
             # 2. VGAE Forward
-            graph_cond = (2.0 * cond_labels[g].to(dtype=h_g.dtype)) - 1.0
+            graph_cond = cond_labels[g].to(dtype=h_g.dtype)
             cond_node = graph_cond.view(1, 1).expand(fs_idx_g.size(0), 1)
             prob_A, _, mu, logvar = self.add_net(h_g, cond_node)
 
