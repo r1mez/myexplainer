@@ -13,7 +13,7 @@ from torch_geometric.nn.inits import glorot, zeros
 # from graph_conv import DenseGATConv
 from torch_geometric.utils import to_dense_adj, to_dense_batch
 
-from typing import Optional
+from typing import Dict, List, Optional
 
 from utils.graph_utils import process_outputs
 
@@ -257,6 +257,257 @@ class MyExplainerV2(nn.Module):
             raise ValueError("Conditional AddVGAE currently expects binary labels encoded as 0/1.")
 
         return cond_labels
+
+    def _collect_undirected_bonds(self, edge_index, batch):
+        device = edge_index.device
+        if edge_index.numel() == 0:
+            empty_long = torch.empty((0,), dtype=torch.long, device=device)
+            return {
+                "graph_ids": empty_long,
+                "src": empty_long,
+                "dst": empty_long,
+                "edge_indices": [],
+                "graph_to_bond_indices": {},
+            }
+
+        src_all = edge_index[0].detach().cpu().tolist()
+        dst_all = edge_index[1].detach().cpu().tolist()
+        graph_ids_all = batch[edge_index[0]].detach().cpu().tolist()
+
+        bond_to_idx: Dict[tuple, int] = {}
+        bond_graph_ids: List[int] = []
+        bond_src: List[int] = []
+        bond_dst: List[int] = []
+        bond_edge_indices: List[List[int]] = []
+
+        for edge_idx, (src, dst, graph_id) in enumerate(zip(src_all, dst_all, graph_ids_all)):
+            if src == dst:
+                continue
+
+            u, v = (src, dst) if src < dst else (dst, src)
+            key = (int(graph_id), int(u), int(v))
+            bond_idx = bond_to_idx.get(key)
+            if bond_idx is None:
+                bond_idx = len(bond_graph_ids)
+                bond_to_idx[key] = bond_idx
+                bond_graph_ids.append(int(graph_id))
+                bond_src.append(int(u))
+                bond_dst.append(int(v))
+                bond_edge_indices.append([edge_idx])
+            else:
+                bond_edge_indices[bond_idx].append(edge_idx)
+
+        graph_to_bond_indices: Dict[int, torch.Tensor] = {}
+        for bond_idx, graph_id in enumerate(bond_graph_ids):
+            graph_to_bond_indices.setdefault(int(graph_id), []).append(bond_idx)
+
+        graph_to_bond_indices = {
+            graph_id: torch.tensor(indices, dtype=torch.long, device=device)
+            for graph_id, indices in graph_to_bond_indices.items()
+        }
+
+        return {
+            "graph_ids": torch.tensor(bond_graph_ids, dtype=torch.long, device=device),
+            "src": torch.tensor(bond_src, dtype=torch.long, device=device),
+            "dst": torch.tensor(bond_dst, dtype=torch.long, device=device),
+            "edge_indices": [
+                torch.tensor(indices, dtype=torch.long, device=device)
+                for indices in bond_edge_indices
+            ],
+            "graph_to_bond_indices": graph_to_bond_indices,
+        }
+
+    def _aggregate_bond_keep_logits(self, edge_logits, bond_edge_indices):
+        if edge_logits.numel() == 0 or not bond_edge_indices:
+            return torch.empty((0,), dtype=edge_logits.dtype, device=edge_logits.device)
+        return torch.stack([edge_logits[edge_ids].mean() for edge_ids in bond_edge_indices], dim=0)
+
+    def _select_oracle_probe_graph_ids(self, graph_to_bond_indices, max_graphs):
+        eligible_graph_ids = sorted(
+            graph_id for graph_id, bond_indices in graph_to_bond_indices.items() if bond_indices.numel() > 0
+        )
+        if max_graphs is None or max_graphs <= 0 or len(eligible_graph_ids) <= max_graphs:
+            return eligible_graph_ids
+
+        if self.training:
+            sampled = torch.randperm(len(eligible_graph_ids), device=self.device)[:max_graphs].cpu().tolist()
+            return [eligible_graph_ids[idx] for idx in sampled]
+
+        return eligible_graph_ids[:max_graphs]
+
+    def _select_delete_candidates_for_graph(self, graph_id, bond_data, delete_scores, fs_nodes_bool, args):
+        graph_bond_indices = bond_data["graph_to_bond_indices"].get(int(graph_id))
+        if graph_bond_indices is None or graph_bond_indices.numel() == 0:
+            return torch.empty((0,), dtype=torch.long, device=self.device)
+
+        graph_bond_list = graph_bond_indices.detach().cpu().tolist()
+
+        topk = max(0, int(getattr(args, "oracle_del_topk", 6)))
+        num_random = max(0, int(getattr(args, "oracle_del_random_negatives", 2)))
+
+        top_candidate_list: List[int] = []
+        if graph_bond_list and topk > 0:
+            top_count = min(topk, len(graph_bond_list))
+            top_scores = delete_scores[graph_bond_indices]
+            top_pos = torch.topk(top_scores, k=top_count).indices.detach().cpu().tolist()
+            top_candidate_list = [graph_bond_list[idx] for idx in top_pos]
+
+        selected_set = set(top_candidate_list)
+        remaining_list = [bond_idx for bond_idx in graph_bond_list if bond_idx not in selected_set]
+        random_candidate_list: List[int] = []
+        if remaining_list and num_random > 0:
+            sample_size = min(num_random, len(remaining_list))
+            if self.training:
+                perm = torch.randperm(len(remaining_list), device=self.device)[:sample_size].cpu().tolist()
+                random_candidate_list = [remaining_list[idx] for idx in perm]
+            else:
+                random_candidate_list = remaining_list[:sample_size]
+
+        candidate_list = top_candidate_list + random_candidate_list
+        if not candidate_list:
+            return torch.empty((0,), dtype=torch.long, device=self.device)
+
+        return torch.tensor(candidate_list, dtype=torch.long, device=self.device)
+
+    def _extract_single_graph_inputs(self, x, edge_index, batch, graph_id):
+        device = x.device
+        node_idx = (batch == int(graph_id)).nonzero(as_tuple=False).view(-1)
+        if node_idx.numel() == 0:
+            return None
+
+        src_all, dst_all = edge_index
+        edge_mask = (batch[src_all] == int(graph_id)) & (batch[dst_all] == int(graph_id))
+        edge_ids = edge_mask.nonzero(as_tuple=False).view(-1)
+
+        global_to_local = torch.full((x.size(0),), -1, dtype=torch.long, device=device)
+        global_to_local[node_idx] = torch.arange(node_idx.size(0), device=device)
+
+        if edge_ids.numel() == 0:
+            edge_index_local = torch.empty((2, 0), dtype=torch.long, device=device)
+        else:
+            edge_index_local = torch.stack(
+                [global_to_local[src_all[edge_ids]], global_to_local[dst_all[edge_ids]]],
+                dim=0,
+            )
+
+        edge_id_to_local = torch.full((edge_index.size(1),), -1, dtype=torch.long, device=device)
+        edge_id_to_local[edge_ids] = torch.arange(edge_ids.size(0), device=device)
+
+        x_local = x[node_idx].float()
+        batch_local = torch.zeros(node_idx.size(0), dtype=torch.long, device=device)
+        return x_local, edge_index_local, batch_local, edge_id_to_local
+
+    def _probe_graph_delete_rewards(self, graphs, graph_id, target_label, bond_data, candidate_bond_indices):
+        extracted = self._extract_single_graph_inputs(graphs.x, graphs.edge_index, graphs.batch, graph_id)
+        if extracted is None:
+            empty_long = torch.empty((0,), dtype=torch.long, device=self.device)
+            empty_float = torch.empty((0,), dtype=graphs.x.dtype, device=self.device)
+            return empty_long, empty_float
+
+        x_local, edge_index_local, batch_local, edge_id_to_local = extracted
+        if edge_index_local.size(1) == 0:
+            empty_long = torch.empty((0,), dtype=torch.long, device=self.device)
+            empty_float = torch.empty((0,), dtype=graphs.x.dtype, device=self.device)
+            return empty_long, empty_float
+
+        source_label = 1 - int(target_label.item())
+        base_mask = torch.ones(edge_index_local.size(1), dtype=x_local.dtype, device=self.device)
+
+        valid_bond_indices: List[int] = []
+        rewards: List[torch.Tensor] = []
+        with torch.no_grad():
+            _, baseline_logits = self.gnn.get_pred_explain(x_local, edge_index_local, base_mask, batch_local)
+            baseline_margin = baseline_logits[0, int(target_label.item())] - baseline_logits[0, source_label]
+
+            for bond_idx in candidate_bond_indices.detach().cpu().tolist():
+                local_edge_ids = edge_id_to_local[bond_data["edge_indices"][bond_idx]]
+                local_edge_ids = local_edge_ids[local_edge_ids >= 0]
+                if local_edge_ids.numel() == 0:
+                    continue
+
+                edge_mask = base_mask.clone()
+                edge_mask[local_edge_ids] = 0.0
+                _, probe_logits = self.gnn.get_pred_explain(x_local, edge_index_local, edge_mask, batch_local)
+                margin_after = probe_logits[0, int(target_label.item())] - probe_logits[0, source_label]
+                rewards.append((margin_after - baseline_margin).detach())
+                valid_bond_indices.append(int(bond_idx))
+
+        if not rewards:
+            empty_long = torch.empty((0,), dtype=torch.long, device=self.device)
+            empty_float = torch.empty((0,), dtype=graphs.x.dtype, device=self.device)
+            return empty_long, empty_float
+
+        return (
+            torch.tensor(valid_bond_indices, dtype=torch.long, device=self.device),
+            torch.stack(rewards, dim=0).to(device=self.device, dtype=x_local.dtype),
+        )
+
+    def _compute_pairwise_delete_rank_loss(self, delete_scores, rewards, tie_eps):
+        if delete_scores.numel() < 2 or rewards.numel() < 2:
+            return None
+
+        reward_diff = rewards.unsqueeze(1) - rewards.unsqueeze(0)
+        valid_pairs = torch.triu(torch.abs(reward_diff) > tie_eps, diagonal=1)
+        if not valid_pairs.any():
+            return None
+
+        score_diff = delete_scores.unsqueeze(1) - delete_scores.unsqueeze(0)
+        reward_sign = torch.sign(reward_diff)
+        return F.softplus(-score_diff[valid_pairs] * reward_sign[valid_pairs]).mean()
+
+    def _compute_oracle_delete_rank_loss(self, args, graphs, y_target, outputs):
+        zero = torch.tensor(0.0, device=self.device)
+        bond_data = self._collect_undirected_bonds(graphs.edge_index, graphs.batch)
+        if bond_data["graph_ids"].numel() == 0:
+            return zero
+
+        bond_keep_logit = self._aggregate_bond_keep_logits(outputs["logit_keep"], bond_data["edge_indices"])
+        if bond_keep_logit.numel() == 0:
+            return zero
+
+        delete_scores = -bond_keep_logit
+        probe_graph_ids = self._select_oracle_probe_graph_ids(
+            bond_data["graph_to_bond_indices"],
+            int(getattr(args, "oracle_del_probe_graphs_per_batch", 4)),
+        )
+        if not probe_graph_ids:
+            return zero
+
+        graph_losses = []
+        tie_eps = float(getattr(args, "oracle_del_reward_tie_eps", 1e-6))
+        for graph_id in probe_graph_ids:
+            candidate_bond_indices = self._select_delete_candidates_for_graph(
+                graph_id,
+                bond_data,
+                delete_scores,
+                outputs["fs_nodes_bool"],
+                args,
+            )
+            if candidate_bond_indices.numel() < 2:
+                continue
+
+            valid_bond_indices, rewards = self._probe_graph_delete_rewards(
+                graphs,
+                graph_id,
+                y_target[int(graph_id)],
+                bond_data,
+                candidate_bond_indices,
+            )
+            if valid_bond_indices.numel() < 2:
+                continue
+
+            graph_loss = self._compute_pairwise_delete_rank_loss(
+                delete_scores[valid_bond_indices],
+                rewards,
+                tie_eps,
+            )
+            if graph_loss is not None:
+                graph_losses.append(graph_loss)
+
+        if not graph_losses:
+            return zero
+
+        return torch.stack(graph_losses, dim=0).mean()
 
     def _get_prototype_graphs_for_class(self, prototype_bank, class_idx):
         if prototype_bank is None:
@@ -591,9 +842,11 @@ class MyExplainerV2(nn.Module):
         recon_loss = outputs["add_recon_loss"]
         kl_loss = outputs["add_kl_loss"]
         proto_loss = self._compute_proto_loss(outputs, y_target)
+        oracle_del_rank = self._compute_oracle_delete_rank_loss(args, graphs, y_target, outputs)
         w_cf = self._get_loss_hparam(args, "w_cf")
         w_l1_add = self._get_loss_hparam(args, "w_l1_add")
         w_l1_del = self._get_loss_hparam(args, "w_l1_del")
+        w_oracle_del_rank = self._get_loss_hparam(args, "w_oracle_del_rank")
         w_vgae_recon = self._get_loss_hparam(args, "w_vgae_recon")
         w_vgae_kl = self._get_loss_hparam(args, "w_vgae_kl")
         w_proto = self._get_loss_hparam(args, "w_proto")
@@ -603,6 +856,7 @@ class MyExplainerV2(nn.Module):
                 w_cf * cf_loss +
                 w_l1_add * l1_add +
                 w_l1_del * l1_del +
+                w_oracle_del_rank * oracle_del_rank +
                 w_vgae_recon * recon_loss +
                 w_vgae_kl * kl_loss +
                 w_proto * proto_loss
@@ -616,6 +870,7 @@ class MyExplainerV2(nn.Module):
             "recon": recon_loss.detach(),
             "kl": kl_loss.detach(),
             "proto": proto_loss.detach(),
+            "oracle_del_rank": oracle_del_rank.detach(),
         }
 
     def _compute_cf_loss(self, logits, y_target, args):

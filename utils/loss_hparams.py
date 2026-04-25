@@ -7,6 +7,7 @@ LOSS_HPARAM_KEYS = (
     "w_cf",
     "w_l1_add",
     "w_l1_del",
+    "w_oracle_del_rank",
     "w_vgae_recon",
     "w_vgae_kl",
     "enable_fs_feature_recon",

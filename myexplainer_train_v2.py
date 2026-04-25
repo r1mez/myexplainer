@@ -10,6 +10,7 @@ from torch_geometric.loader import DataLoader
 
 from evaluationV2 import evaluate
 from models.myexplainerV2 import MyExplainerV2
+from utils.explainer_hparams import EXPLAINER_HPARAM_KEYS, apply_explainer_hparams
 from utils import get_datasets, train_collate_fn
 from utils.loss_hparams import LOSS_HPARAM_KEYS, apply_loss_hparams
 from utils.pair_data import MappedDataset
@@ -152,7 +153,7 @@ def parse_args():
     parser.add_argument('--dataset', type=str, default='alkane_carbonyl', help='Dataset name')
     parser.add_argument('--gnn_path', type=str, default='param/', help='GNN directory')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use (cpu or cuda)')
-    parser.add_argument('--train_mode',type=bool,default=True,help='Current mode')
+    parser.add_argument('--train_mode',type=bool,default=False,help='Current mode')
     parser.add_argument('--task', type=str, default='graph', help='Task type: graph classification or node classification')
 
 
@@ -186,6 +187,19 @@ def parse_args():
         default=None,
         help='Path to dataset-specific loss hyperparameter YAML config'
     )
+    parser.add_argument(
+        '--explainer_config_path',
+        type=str,
+        default=None,
+        help='Path to dataset-specific explainer hyperparameter YAML config'
+    )
+    parser.add_argument(
+        '--eval_graph_mode',
+        type=str,
+        choices=['discrete', 'continuous'],
+        default='discrete',
+        help='Evaluation graph mode: thresholded discrete graph or continuous weighted graph',
+    )
     parser.add_argument('--proto_topk', type=int, default=100, help='Top-K discriminative pattern families per class')
     parser.add_argument('--proto_refresh_every', type=int, default=5, help='Refresh prototypes every N epochs')
     parser.add_argument('--pattern_family_min_count', type=int, default=2,
@@ -202,6 +216,7 @@ def main():
     args = parse_args()
     args.dataset = args.dataset.lower()
     apply_loss_hparams(args)
+    apply_explainer_hparams(args)
 
     # 设置设备为torch.device对象
     args.device = torch.device(f'cuda:{args.cuda}' if torch.cuda.is_available() else 'cpu')
@@ -209,6 +224,10 @@ def main():
     print("Loss hyperparameters:")
     for key in LOSS_HPARAM_KEYS:
         print(f"  {key}: {getattr(args, key)}")
+    print("Explainer hyperparameters:")
+    for key in EXPLAINER_HPARAM_KEYS:
+        print(f"  {key}: {getattr(args, key)}")
+    print(f"Evaluation graph mode: {args.eval_graph_mode}")
 
     # 加载数据集
     print("\n1. Loading datasets...")
@@ -273,19 +292,19 @@ def main():
     train_loader_masked = TorchDataLoader(
         train_dataset_with_masks,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=False,
         collate_fn=train_collate_fn
     )
     test_loader_masked = TorchDataLoader(
         test_dataset_with_masks,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=False,
         collate_fn=train_collate_fn
     )
     val_loader_masked = TorchDataLoader(
         val_dataset_with_masks,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=False,
         collate_fn=train_collate_fn
     )
     print(f"  Batch size: {args.batch_size}")
@@ -355,12 +374,13 @@ def main():
     # 8. 评估模型
     print("\n9. Evaluating on validation set...")
     print("=" * 80)
+    print(f"  Evaluation graph mode: {args.eval_graph_mode}")
 
     evaluation_metrics = evaluate(
         args=args,
         model=trained_model,
         gnn=gnn,
-        data_loader=val_loader_masked,
+        data_loader=test_loader_masked,
     )
     print("\nEvaluation Results on Validation Set:")
     print(

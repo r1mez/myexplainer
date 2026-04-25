@@ -14,6 +14,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
         'cf': [],
         'kl': [],
         'proto': [],
+        'oracle_del_rank': [],
         'val_total': []
     }
 
@@ -48,6 +49,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
             'cf': 0.0,
             'kl': 0.0,
             'proto': 0.0,
+            'oracle_del_rank': 0.0,
         }
 
         num_batches = 0
@@ -134,6 +136,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
                 'cf': f'{loss_dict["cf"]:.4f}',
                 'kl': f'{loss_dict["kl"]:.4f}',
                 'proto': f'{loss_dict["proto"]:.4f}',
+                'oracle_del_rank': f'{loss_dict["oracle_del_rank"]:.4f}',
             })
 
         # 计算epoch平均损失

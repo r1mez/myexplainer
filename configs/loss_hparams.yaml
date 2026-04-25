@@ -3,6 +3,7 @@ datasets:
     w_cf: 10.0
     w_l1_add: 5.0
     w_l1_del: 0.5
+    w_oracle_del_rank: 1.0
     w_vgae_recon: 5.0
     w_vgae_kl: 1.0
     enable_fs_feature_recon: false
@@ -14,6 +15,7 @@ datasets:
     w_cf: 10.0
     w_l1_add: 5.0
     w_l1_del: 0.5
+    w_oracle_del_rank: 1.0
     w_vgae_recon: 5.0
     w_vgae_kl: 1.0
     enable_fs_feature_recon: false
@@ -25,6 +27,7 @@ datasets:
     w_cf: 10.0
     w_l1_add: 5.0
     w_l1_del: 0.5
+    w_oracle_del_rank: 1.0
     w_vgae_recon: 5.0
     w_vgae_kl: 1.0
     enable_fs_feature_recon: false
@@ -36,6 +39,7 @@ datasets:
     w_cf: 10.0
     w_l1_add: 5.0
     w_l1_del: 0.5
+    w_oracle_del_rank: 1.0
     w_vgae_recon: 5.0
     w_vgae_kl: 1.0
     enable_fs_feature_recon: false
@@ -47,6 +51,7 @@ datasets:
     w_cf: 10.0
     w_l1_add: 5.0
     w_l1_del: 0.5
+    w_oracle_del_rank: 1.0
     w_vgae_recon: 5.0
     w_vgae_kl: 1.0
     enable_fs_feature_recon: false
@@ -58,6 +63,7 @@ datasets:
     w_cf: 10.0
     w_l1_add: 5.0
     w_l1_del: 0.5
+    w_oracle_del_rank: 1.0
     w_vgae_recon: 5.0
     w_vgae_kl: 1.0
     enable_fs_feature_recon: false
@@ -66,20 +72,22 @@ datasets:
     cf_margin: 0.5
     lambda_cf_margin: 1.0
   alkane_carbonyl:
-    w_cf: 50.0
-    w_l1_add: 5.0
-    w_l1_del: 300.0
-    w_vgae_recon: 5.0
-    w_vgae_kl: 1.0
+    w_cf: 15.0
+    w_l1_add: 1.0
+    w_l1_del: 135.0
+    w_oracle_del_rank: 0.01
+    w_vgae_recon: 2.0
+    w_vgae_kl: 0.5
     enable_fs_feature_recon: false
     w_vgae_feat_recon: 1.0
-    w_proto: 0.1
+    w_proto: 0.0
     cf_margin: 0.5
     lambda_cf_margin: 1.0
   fluoride_carbonyl:
     w_cf: 10.0
     w_l1_add: 5.0
     w_l1_del: 0.5
+    w_oracle_del_rank: 1.0
     w_vgae_recon: 5.0
     w_vgae_kl: 1.0
     enable_fs_feature_recon: false
@@ -91,6 +99,7 @@ datasets:
     w_cf: 10.0
     w_l1_add: 5.0
     w_l1_del: 0.5
+    w_oracle_del_rank: 1.0
     w_vgae_recon: 5.0
     w_vgae_kl: 1.0
     enable_fs_feature_recon: false

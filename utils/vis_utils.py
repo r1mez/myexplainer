@@ -26,6 +26,7 @@ def visualize_explainer_graph(
     outputs,
     dataset_name: Optional[str] = None,
     g_idx: int = 0,
+    render_mode: str = "discrete",
     tau_keep: float = 0.5,
     tau_add: float = 0.5,
     layout: str = "spring",
@@ -34,8 +35,8 @@ def visualize_explainer_graph(
     """
     Visualize the generated counterfactual edit proposal for one graph in a batch.
 
-    Existing edges are split into keep vs. drop by `tau_keep`, and candidate
-    additions above `tau_add` are drawn as dashed red edges.
+    Existing edges and candidate additions can be rendered either as
+    thresholded discrete edits or continuous edge strengths.
     """
     plt.close("all")
 
@@ -150,7 +151,9 @@ def visualize_explainer_graph(
         alpha=0.9,
     )
 
-    if orig_edges:
+    render_mode = str(render_mode).lower()
+
+    if orig_edges and render_mode == "discrete":
         orig_scores_np = np.array(orig_scores)
         edges_keep = []
         edges_drop = []
@@ -181,7 +184,7 @@ def visualize_explainer_graph(
                 alpha=0.4,
             )
 
-    if new_edges:
+    if new_edges and render_mode == "discrete":
         new_scores_np = np.array(new_scores)
         edges_add = []
         for i, score in enumerate(new_scores_np):
@@ -199,6 +202,50 @@ def visualize_explainer_graph(
                 alpha=0.9,
             )
 
+    if render_mode == "continuous":
+        if orig_edges:
+            orig_scores_np = np.array(orig_scores)
+            score_min = float(orig_scores_np.min()) if orig_scores_np.size > 0 else 0.0
+            score_max = float(orig_scores_np.max()) if orig_scores_np.size > 0 else 1.0
+            denom = max(score_max - score_min, 1e-8)
+            for edge, score in zip(orig_edges, orig_scores_np):
+                if orig_scores_np.size > 1 and (score_max - score_min) > 1e-8:
+                    normalized = (float(score) - score_min) / denom
+                else:
+                    normalized = float(score)
+                width = 1.0 + 3.5 * max(float(score), 0.0)
+                alpha = 0.2 + 0.75 * max(0.0, min(1.0, normalized))
+                nx.draw_networkx_edges(
+                    G,
+                    pos,
+                    edgelist=[edge],
+                    edge_color="#1f77b4",
+                    width=width,
+                    alpha=alpha,
+                )
+
+        if new_edges:
+            new_scores_np = np.array(new_scores)
+            score_min = float(new_scores_np.min()) if new_scores_np.size > 0 else 0.0
+            score_max = float(new_scores_np.max()) if new_scores_np.size > 0 else 1.0
+            denom = max(score_max - score_min, 1e-8)
+            for edge, score in zip(new_edges, new_scores_np):
+                if new_scores_np.size > 1 and (score_max - score_min) > 1e-8:
+                    normalized = (float(score) - score_min) / denom
+                else:
+                    normalized = float(score)
+                width = 1.0 + 3.5 * max(float(score), 0.0)
+                alpha = 0.2 + 0.75 * max(0.0, min(1.0, normalized))
+                nx.draw_networkx_edges(
+                    G,
+                    pos,
+                    edgelist=[edge],
+                    edge_color="#d62728",
+                    width=width,
+                    style="dashed",
+                    alpha=alpha,
+                )
+
     labels = _labels_for_visualized_graph(x_g, dataset_name=dataset_name)
     nx.draw_networkx_labels(G, pos, labels=labels, font_size=10, font_color="black", font_weight="bold")
 
@@ -209,13 +256,21 @@ def visualize_explainer_graph(
 
     from matplotlib.lines import Line2D
 
-    legend_elements = [
-        Line2D([0], [0], color="#1f77b4", lw=2.5, label=f"Keep (p>{tau_keep})"),
-        Line2D([0], [0], color="grey", lw=1.5, linestyle=":", alpha=0.5, label=f"Drop (p<{tau_keep})"),
-        Line2D([0], [0], color="#d62728", lw=2.5, linestyle="--", label=f"Add (p>{tau_add})"),
-        Line2D([0], [0], marker="o", color="w", markerfacecolor="#ffaaaa", markersize=10, label="FS Node"),
-        Line2D([0], [0], marker="o", color="w", markerfacecolor="#ffeeee", markersize=10, label="Normal Node"),
-    ]
+    if render_mode == "continuous":
+        legend_elements = [
+            Line2D([0], [0], color="#1f77b4", lw=2.5, alpha=0.8, label="Keep strength"),
+            Line2D([0], [0], color="#d62728", lw=2.5, linestyle="--", alpha=0.8, label="Add strength"),
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="#ffaaaa", markersize=10, label="FS Node"),
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="#ffeeee", markersize=10, label="Normal Node"),
+        ]
+    else:
+        legend_elements = [
+            Line2D([0], [0], color="#1f77b4", lw=2.5, label=f"Keep (p>{tau_keep})"),
+            Line2D([0], [0], color="grey", lw=1.5, linestyle=":", alpha=0.5, label=f"Drop (p<{tau_keep})"),
+            Line2D([0], [0], color="#d62728", lw=2.5, linestyle="--", label=f"Add (p>{tau_add})"),
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="#ffaaaa", markersize=10, label="FS Node"),
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="#ffeeee", markersize=10, label="Normal Node"),
+        ]
     plt.legend(handles=legend_elements, loc="upper right", fontsize=8)
 
     plt.axis("off")
