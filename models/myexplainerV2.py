@@ -172,7 +172,7 @@ class MyExplainerV2(nn.Module):
 
         # Step 5: Construct CF Graph
         edge_index_cf, edge_weight_cf = self._build_cf_graph(
-            edge_index, p_keep, cand_src, cand_dst, p_add
+            edge_index, p_keep, cand_src, cand_dst, p_add, batch=batch
         )
         cf_fs_embed, cf_fs_graph_ids = self._encode_reconstructed_fs_subgraphs(
             x,
@@ -321,6 +321,20 @@ class MyExplainerV2(nn.Module):
         if edge_logits.numel() == 0 or not bond_edge_indices:
             return torch.empty((0,), dtype=edge_logits.dtype, device=edge_logits.device)
         return torch.stack([edge_logits[edge_ids].mean() for edge_ids in bond_edge_indices], dim=0)
+
+    def _symmetrize_existing_edge_weights(self, edge_index, edge_weight, batch):
+        if edge_weight is None or batch is None or edge_index.numel() == 0 or edge_weight.numel() == 0:
+            return edge_weight
+
+        sym_edge_weight = edge_weight.clone()
+        bond_data = self._collect_undirected_bonds(edge_index, batch)
+        for edge_ids in bond_data["edge_indices"]:
+            if edge_ids.numel() == 0:
+                continue
+            bond_weight = edge_weight[edge_ids].mean()
+            sym_edge_weight[edge_ids] = bond_weight
+
+        return sym_edge_weight
 
     def _select_oracle_probe_graph_ids(self, graph_to_bond_indices, max_graphs):
         eligible_graph_ids = sorted(
@@ -772,22 +786,30 @@ class MyExplainerV2(nn.Module):
 
             return valid_indices
 
-    def _build_cf_graph_legacy(self, edge_index, p_keep, cand_src, cand_dst, p_add):
+    def _build_cf_graph_legacy(self, edge_index, p_keep, cand_src, cand_dst, p_add, batch=None):
         """组合原有边和新增边，构建 CF 图"""
+        p_keep_sym = self._symmetrize_existing_edge_weights(edge_index, p_keep, batch)
         if cand_src is None or p_add is None:
-            return edge_index, p_keep
+            return edge_index, p_keep_sym
 
-        edge_index_add = torch.stack([cand_src, cand_dst], dim=0)
+        edge_index_add = torch.cat(
+            [
+                torch.stack([cand_src, cand_dst], dim=0),
+                torch.stack([cand_dst, cand_src], dim=0),
+            ],
+            dim=1,
+        )
+        edge_weight_add = torch.cat([p_add, p_add], dim=0)
 
         edge_index_cf = torch.cat([edge_index, edge_index_add], dim=1)
-        edge_weight_cf = torch.cat([p_keep, p_add], dim=0)
+        edge_weight_cf = torch.cat([p_keep_sym, edge_weight_add], dim=0)
 
         return edge_index_cf, edge_weight_cf
 
     # ================= Loss 计算 =================
 
-    def _build_cf_graph(self, edge_index, p_keep, cand_src, cand_dst, p_add):
-        return self._build_cf_graph_legacy(edge_index, p_keep, cand_src, cand_dst, p_add)
+    def _build_cf_graph(self, edge_index, p_keep, cand_src, cand_dst, p_add, batch=None):
+        return self._build_cf_graph_legacy(edge_index, p_keep, cand_src, cand_dst, p_add, batch=batch)
 
     # ================= Loss 璁＄畻 =================
     def _get_loss_hparam(self, args, name):
