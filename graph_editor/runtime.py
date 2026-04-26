@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch_geometric.data import Data
+from torch_geometric.data.separate import separate
 
 import gnns
 from graph_editor.metadata import (
@@ -25,6 +26,42 @@ from graph_editor.metadata import (
     resolve_model_path,
 )
 from utils.dataset import get_datasets
+
+
+BENZENE_EDITOR_FRACTION = 0.1
+BENZENE_SPLIT_SEED = 42
+
+
+class _IndexedInMemoryDataset:
+    def __init__(self, data, slices: dict, indices: Sequence[int]):
+        self.data = data
+        self.slices = slices
+        self.indices = [int(index) for index in indices]
+        self._cache: Dict[int, Data] = {}
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, index: int):
+        if isinstance(index, slice):
+            return [self[item] for item in range(*index.indices(len(self)))]
+
+        index = int(index)
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+
+        if index not in self._cache:
+            source_index = self.indices[index]
+            self._cache[index] = separate(
+                cls=self.data.__class__,
+                batch=self.data,
+                idx=source_index,
+                slice_dict=self.slices,
+                decrement=False,
+            )
+        return self._cache[index]
 
 
 class GraphEditorError(Exception):
@@ -249,6 +286,11 @@ class GraphEditorRuntime:
         if dataset in self._dataset_cache:
             return self._dataset_cache[dataset]
 
+        if dataset == "benzene":
+            split_map = self._load_benzene_editor_dataset()
+            self._dataset_cache[dataset] = split_map
+            return split_map
+
         try:
             train_dataset, evaluation_dataset, test_dataset = get_datasets(
                 name=dataset,
@@ -264,6 +306,94 @@ class GraphEditorRuntime:
         }
         self._dataset_cache[dataset] = split_map
         return split_map
+
+    def _load_benzene_editor_dataset(self) -> Dict[str, object]:
+        processed_dir = self.data_root / "benzene" / "processed"
+        split_paths = {
+            "training": processed_dir / "training_data.pt",
+            "evaluation": processed_dir / "evaluation_data.pt",
+            "testing": processed_dir / "testing_data.pt",
+        }
+        if all(path.exists() for path in split_paths.values()):
+            return {
+                split: self._load_reduced_inmemory_cache(path)
+                for split, path in split_paths.items()
+            }
+
+        full_path = processed_dir / "data.pt"
+        if not full_path.exists():
+            raise GraphEditorError(
+                500,
+                "Graph editor requires a preprocessed benzene cache under "
+                f"'{processed_dir}'. This avoids rebuilding the very large raw benzene dataset.",
+            )
+
+        data, slices = self._load_inmemory_cache(full_path)
+        num_graphs = self._infer_inmemory_length(slices)
+        if num_graphs <= 0:
+            raise GraphEditorError(500, "The preprocessed benzene cache contains no graphs.")
+
+        split_indices = self._benzene_split_indices(num_graphs)
+        return {
+            split: _IndexedInMemoryDataset(data, slices, indices)
+            for split, indices in split_indices.items()
+        }
+
+    def _load_reduced_inmemory_cache(self, path: Path) -> _IndexedInMemoryDataset:
+        data, slices = self._load_inmemory_cache(path)
+        num_graphs = self._infer_inmemory_length(slices)
+        keep_count = max(1, int(num_graphs * BENZENE_EDITOR_FRACTION)) if num_graphs else 0
+        return _IndexedInMemoryDataset(data, slices, list(range(keep_count)))
+
+    def _load_inmemory_cache(self, path: Path):
+        try:
+            payload = torch.load(str(path), map_location="cpu")
+        except Exception as exc:
+            raise GraphEditorError(
+                500,
+                f"Failed to load preprocessed benzene cache '{path}': {exc}",
+            ) from exc
+
+        if not isinstance(payload, (tuple, list)) or len(payload) < 2:
+            raise GraphEditorError(
+                500,
+                f"Unexpected benzene cache format in '{path}'.",
+            )
+
+        data, slices = payload[0], payload[1]
+        if not isinstance(slices, dict) or not slices:
+            raise GraphEditorError(
+                500,
+                f"Unexpected benzene slice metadata in '{path}'.",
+            )
+        return data, slices
+
+    def _infer_inmemory_length(self, slices: dict) -> int:
+        for value in slices.values():
+            try:
+                return max(int(torch.as_tensor(value).numel()) - 1, 0)
+            except Exception:
+                continue
+        return 0
+
+    def _benzene_split_indices(self, num_graphs: int) -> Dict[str, List[int]]:
+        generator = torch.Generator()
+        generator.manual_seed(BENZENE_SPLIT_SEED)
+        shuffled = torch.randperm(num_graphs, generator=generator).tolist()
+
+        train_end = int(0.8 * num_graphs)
+        evaluation_end = int(0.9 * num_graphs)
+        full_splits = {
+            "training": shuffled[:train_end],
+            "evaluation": shuffled[evaluation_end:],
+            "testing": shuffled[train_end:evaluation_end],
+        }
+
+        reduced_splits = {}
+        for split, indices in full_splits.items():
+            keep_count = max(1, int(len(indices) * BENZENE_EDITOR_FRACTION)) if indices else 0
+            reduced_splits[split] = indices[:keep_count]
+        return reduced_splits
 
     def _first_available_graph(self, split_map: Dict[str, object]):
         for split in SUPPORTED_SPLITS:
