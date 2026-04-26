@@ -934,6 +934,14 @@ function applyVectorUpdate(nodeId) {
 function renderPredictionPanel() {
   refs.predictionPanel.innerHTML = "";
 
+  const labelBlock = document.createElement("div");
+  labelBlock.className = "prediction-block";
+  labelBlock.innerHTML = `
+    <h3>原始标签</h3>
+    <p>原始标签：<strong>${escapeHtml(formatOriginalLabel())}</strong></p>
+  `;
+  refs.predictionPanel.appendChild(labelBlock);
+
   const currentBlock = renderPredictionBlock(
     "当前图概率",
     state.currentPrediction,
@@ -1005,6 +1013,11 @@ function renderPredictionBlock(title, prediction, note) {
     ${rows}
   `;
   return block;
+}
+
+function formatOriginalLabel() {
+  const label = state.graphMeta?.y;
+  return label === null || label === undefined ? "unknown" : String(label);
 }
 
 async function predictCurrentGraph() {
