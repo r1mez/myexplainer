@@ -4,107 +4,97 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a graph neural network (GNN) explainability research project focused on molecular graph analysis, particularly for the Mutagenicity dataset. The codebase implements counterfactual explanation methods using variational graph autoencoders (VGAE) and graph edit distance (GED) calculations.
+CCFGExplainer is a research project for generating counterfactual explanations for GNN classifiers on graph classification tasks. Given a pre-trained GNN classifier and an input graph, it learns minimal graph structure modifications (edge deletions/additions) so the modified "counterfactual graph" causes the GNN to predict the opposite class. Primarily designed for molecular graph datasets (MUTAG, BBBP, Benzene, etc.) and synthetic datasets (BA-2Motif). Binary classification only (`num_classes = 2`).
 
-## Core Architecture
+## Running the Project
 
-### Dataset Pipeline
-- **Datasets** (`datasets/`): Custom PyTorch Geometric dataset implementations for multiple graph datasets (BA3Motif, Mutagenicity/MUTAG, NCI1, BBBP, Synthetic, WebDataset)
-- **Data Loading**: Uses `utils.dataset.get_datasets()` to load train/val/test splits
-- **Molecular Encoding**: Atoms are one-hot encoded using `MUTAG_atom_map` (14 atom types: C, O, Cl, H, N, F, Br, S, P, I, Na, K, Li, Ca), edges are one-hot encoded (3 bond types: single, double, triple)
-
-### GNN Models
-- **Model Zoo** (`gnns/`): Dataset-specific GCN architectures (Mutag_GCN, BA3MotifNet, NCI1GCN, etc.)
-- **Loading**: Pre-trained models stored in `param/gnns/{dataset}_gcn.pt`
-- **Key Methods**: `get_pred()` returns predictions, `get_graph_rep()` returns graph embeddings
-
-### Explainability Pipeline
-
-#### 1. Subgraph Extraction (`utils/ps/mol_bpe.py`)
-- Uses **graph byte-pair encoding (BPE)** to extract frequent molecular subgraphs from SMILES
-- `graph_bpe()`: Iteratively merges frequent subgraphs to build vocabulary
-- `Tokenizer`: Converts molecules to subgraph representations
-- Principal subgraphs are ranked by frequency and stored
-
-#### 2. Graph Pair Construction (`utils/pair_data.py`)
-- `GraphPairData`: Creates training pairs of (original graph, target graph)
-- For each graph, finds top-k most similar graphs with different predicted labels using cosine similarity on graph embeddings
-- Filters by prediction confidence threshold (default 0.9)
-- Returns paired graphs with their embeddings and distances
-
-#### 3. Counterfactual Generation (`models/`)
-- **MyExplainer** (`myexplainer.py`): VAE-based model with encoder-decoder architecture
-  - Encoder: Takes graph features → latent representation
-  - Decoder: Latent + counterfactual label → reconstructed graph
-  - Uses dense graph operations (DenseGCNConv/DenseGATConv)
-- **VGAE variants** (`vgae.py`, `vgae_v2.py`, `vgae_v3.py`): Different VGAE implementations for graph transformation
-
-#### 4. Subgraph Matching (`utils/subgraph_utils.py`)
-- `find_largest_subgraph()`: Finds the largest extracted subgraph present in a target molecule using RDKit substructure matching
-- `generate_subgraph_mask()`: Creates node/edge masks for identified subgraphs
-- Uses SMARTS/SMILES to RDKit Mol conversions with hydrogen handling and valence correction
-
-### Graph Edit Distance (`GED/`)
-- **GRAPHEDX** (`graphedx.py`): Neural GED estimation using Sinkhorn iterations
-- Two-level transport plan: node alignment → edge alignment
-- Used for computing graph similarity metrics
-
-### Utilities
-- **graph_utils.py**: Conversions between PyG Data ↔ RDKit Mol ↔ SMILES/SMARTS
-  - `data_to_mol()`: PyG Data → RDKit with atom/bond mapping
-  - `smarts_to_data()`: SMARTS → PyG Data with one-hot encoding
-  - `_sanitize_with_valence_correction()`: Handles valence issues in generated molecules
-- **vis_utils.py**: Visualization of subgraphs with edge masks
-- **train_utils.py**: Training/testing utilities (`Gtrain`, `Gtest`)
-
-## Main Workflow
-
-The typical execution flow in `main.py`:
-
-1. **Load dataset and GNN**: `get_datasets()` + load pretrained GNN from `param/gnns/`
-2. **Extract subgraph vocabulary**: Use `graph_bpe()` to get frequent molecular patterns from SMILES (stores lists like `smis_0`, `smis_1` for each class)
-3. **Find explanatory subgraphs**: For a target molecule, use `find_largest_subgraph()` to identify which vocabulary subgraph is present
-4. **Generate masks**: Use `generate_subgraph_mask()` to get node/edge masks for visualization
-5. **Visualize**: `visualize_subgraph()` highlights the explanatory subgraph
-
-## Development Commands
-
-### Running the Main Pipeline
 ```bash
-python main.py --cuda 0 --dataset mutag --top_k 5 --threshold 0.9 --epochs 200
+# Train on BA-2Motif (default)
+python myexplainer_train_v2.py --dataset ba2motif --cuda 0 --epochs 100
+
+# Train on MUTAG
+python myexplainer_train_v2.py --dataset mutag --cuda 0 --epochs 100 --batch_size 256
+
+# Evaluate only (load checkpoint)
+python myexplainer_train_v2.py --dataset ba2motif --train_mode False
+
+# CPU mode
+python myexplainer_train_v2.py --dataset ba2motif --device cpu --epochs 100
+
+# Launch interactive graph editor web UI
+python -m graph_editor.server --host 127.0.0.1 --port 7860 --device cuda:0
+
+# Run baseline models individually
+python -m models.atex_cf
+python -m models.c2explainer
+python -m models.cf_gnnexplainer
+python -m models.clear
 ```
 
-**Key Arguments:**
-- `--cuda`: GPU device ID
-- `--dataset`: Dataset name (MUTAG, etc.)
-- `--gnn_path`: Directory for pretrained GNNs (default: `param/`)
-- `--top_k`: Number of similar graphs for pairing
-- `--threshold`: Prediction confidence threshold
-- `--vocab_len`: Number of subgraphs to extract
-- `--epochs`: Training epochs for VGAE
+No formal build system, test framework, or linter configuration exists. Seed is fixed to 42 via `set_seed(42)`.
 
-### Working with the Codebase
+## Dependencies
 
-**Important Constants:**
-- Atom mapping: 14 types in `MUTAG_atom_map` (graph_utils.py, subgraph_utils.py)
-- Bond mapping: 3 types - {0: SINGLE, 1: DOUBLE, 2: TRIPLE}
-- Device: Configured via args.device = `torch.device(f'cuda:{args.cuda}')`
-
-**Data Formats:**
-- Graphs use PyTorch Geometric `Data` objects with `.x` (node features), `.edge_index`, `.edge_attr`, `.y` (labels)
-- Molecular structures interchange between PyG Data, RDKit Mol, SMILES, and SMARTS representations
-
-**Pre-trained Model Loading:**
-```python
-gnn = torch.load(f'param/gnns/{dataset_name}_gcn.pt', map_location=device)
+No `requirements.txt` or `pyproject.toml`. Install manually:
+```
+python >= 3.9, pytorch, torch-geometric, torch-scatter, numpy, scipy,
+scikit-learn, networkx, python-igraph, matplotlib, tqdm, pandas, rdkit
 ```
 
-## Known Patterns
+## Architecture
 
-1. **SMILES/SMARTS Processing**: Always uses RDKit with explicit hydrogen handling and valence correction via `_sanitize_with_valence_correction()`
+### Main Entry Point
+`myexplainer_train_v2.py` — orchestrates the full pipeline:
+1. Loads per-dataset YAML configs (`configs/loss_hparams.yaml`, `configs/explainer_hparams.yaml`)
+2. Loads dataset via `utils/dataset.py:get_datasets()`
+3. Loads pre-trained GNN from `param/gnns/<dataset>_gcn.pt`
+4. Splits training data by GNN predictions (class 0 vs class 1)
+5. Mines frequent subgraphs via `utils/subgraph_method.py:subgraph_mining()`
+6. Builds prototype bank, creates `MappedDataset` (VF2 pattern matching)
+7. Trains `MyExplainerV2` or loads checkpoint, then evaluates
 
-2. **Graph Pairing**: The paired dataset construction is computationally expensive - uses batched operations with cosine similarity for efficiency
+### Core Model (`models/myexplainerV2.py`)
+`MyExplainerV2` architecture:
+- **GCN Encoder**: 2-layer GCNConv for node embeddings
+- **DeleteNet**: MLP predicting edge retention probabilities
+- **AddVGAENet**: VGAE-style module generating candidate edges within frequent subgraph regions
+- **Prototype alignment**: cosine similarity loss against class-specific subgraph embeddings
 
-3. **Subgraph Vocabulary**: The BPE extraction runs in multiprocessing mode (see `mol_bpe.py`) and generates sorted vocabularies by frequency
+Loss components: CF prediction (cross-entropy + margin), L1 sparsity, VGAE reconstruction/KL, prototype alignment, oracle-guided delete ranking.
 
-4. **Visualization**: Subgraph masks are boolean tensors aligned with node/edge indices - edge masks handle bidirectional edges in undirected graphs
+### Baseline Models (`models/`)
+`atex_cf.py`, `c2explainer.py`, `cf_gnnexplainer.py`, `clear.py`, `rsgg_ce.py` — each has its own `__main__` block for standalone execution.
+
+### GNN Classifiers (`gnns/`)
+One classifier per dataset (e.g., `ba2motif_gnn.py` → `BA2MotifGCN`). Pre-trained weights stored in `param/gnns/`. All re-exported from `gnns/__init__.py`.
+
+### Datasets (`datasets/`)
+PyTorch Geometric `InMemoryDataset` wrappers. Factory function in `utils/dataset.py` maps dataset name to train/val/test splits.
+
+### Key Utilities (`utils/`)
+- `subgraph_method.py` — Frequent subgraph mining via igraph VF2, class-wise pattern generation
+- `pair_data.py` — `MappedDataset` for VF2 pattern-to-graph matching, custom collate functions
+- `train_myexplainer.py` — Training loop with validation, checkpointing, prototype refresh, LR scheduling
+- `graph_utils.py` — SMARTS→PyG conversion (RDKit), explanatory subgraph extraction
+- `loss_hparams.py` / `explainer_hparams.py` — Load per-dataset configs from YAML
+- `simple_yaml.py` — Custom YAML parser (no PyYAML dependency)
+
+### Graph Editor (`graph_editor/`)
+Standalone web app for interactive graph editing and GNN probing. HTTP server with REST API (`/api/datasets`, `/api/graph`, `/api/predict`).
+
+### Evaluation (`evaluationV2.py`)
+Metrics: validity, proximity, fidelity, sparsity, runtime, oracle calls, per-class flip success. Supports `discrete` and `continuous` eval modes (`--eval_graph_mode`).
+
+## Configuration
+
+- `configs/loss_hparams.yaml` — Per-dataset loss weights (CF loss, L1, oracle, VGAE, prototype, margin)
+- `configs/explainer_hparams.yaml` — Per-dataset explainer params (oracle_del_topk, etc.)
+- `configs/node_label_config.yaml` — Atom/element labels for one-hot node features per dataset
+- All configs use a custom YAML subset parser (`utils/simple_yaml.py`)
+
+## Key Patterns
+
+- Dataset-specific tuning is pervasive: loss weights, hyperparameters, and subgraph thresholds all vary per dataset
+- Prototype bank is refreshed every N epochs during training (`--proto_refresh_every`)
+- Oracle-guided delete ranking probes the frozen GNN to rank edge importance
+- The `graph_editor/metadata.py` module is shared between the editor and the main pipeline for node label inference
