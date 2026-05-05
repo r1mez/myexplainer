@@ -81,6 +81,126 @@ def _continuous_graph_deltas(ori_graph: Data, cf_graph: Data):
     return soft_edit_mass, len(union_keys), len(ori_map)
 
 
+def _apply_topk_cf_filter(graphs, outputs, topk):
+    """Rebuild CF graph with at most K edge changes (additions + deletions).
+
+    For each graph: ranks all candidate edge changes by confidence, takes top-K,
+    then rebuilds the CF graph with only those changes applied.
+
+    Returns new outputs dict with filtered edge_index_cf and edge_weight_cf.
+    """
+    ori_edge_index = graphs.edge_index
+    ori_batch = graphs.batch
+    p_keep = outputs["p_keep"]
+    cand_src = outputs["cand_src"]
+    cand_dst = outputs["cand_dst"]
+    p_add = outputs["p_add"]
+
+    B = int(ori_batch.max().item()) + 1 if ori_batch.numel() > 0 else 0
+    device = ori_edge_index.device if ori_edge_index.numel() > 0 else p_keep.device
+    dtype = p_keep.dtype
+
+    if ori_edge_index.numel() == 0:
+        return outputs
+
+    ori_graph_ids = ori_batch[ori_edge_index[0]]
+
+    # Build undirected canonical set for original edges
+    ori_src_list = ori_edge_index[0].detach().cpu().tolist()
+    ori_dst_list = ori_edge_index[1].detach().cpu().tolist()
+    ori_canon_set = set()
+    for s, d in zip(ori_src_list, ori_dst_list):
+        ori_canon_set.add((min(s, d), max(s, d)))
+
+    # Collect candidate additions with deduplication (undirected)
+    cand_graph_ids = ori_batch[cand_src] if cand_src is not None and cand_src.numel() > 0 else torch.empty(0, dtype=torch.long, device=device)
+    cand_seen = {}  # canon -> (idx, p_add)
+    if cand_src is not None:
+        for i in range(cand_src.numel()):
+            s = int(cand_src[i])
+            d = int(cand_dst[i])
+            canon = (min(s, d), max(s, d))
+            p = float(p_add[i])
+            if canon not in cand_seen or p > cand_seen[canon][1]:
+                cand_seen[canon] = (i, p)
+
+    new_edge_parts = []
+    new_weight_parts = []
+
+    for g in range(B):
+        # Collect all candidate changes (deletions + additions) with scores
+        changes = []  # (score, type, ...)
+
+        # --- Deletions: original edges with p_keep < 0.5 ---
+        g_ori_mask = ori_graph_ids == g
+        if g_ori_mask.any():
+            g_ori_indices = g_ori_mask.nonzero(as_tuple=False).view(-1)
+            g_ori_keep = p_keep[g_ori_indices]
+
+            del_candidates = (g_ori_keep < 0.5).nonzero(as_tuple=False).view(-1)
+            for local_idx in del_candidates:
+                edge_idx = g_ori_indices[local_idx].item()
+                score = 1.0 - float(g_ori_keep[local_idx])
+                changes.append((score, "del", edge_idx))
+        else:
+            g_ori_indices = torch.empty(0, dtype=torch.long, device=device)
+
+        # --- Additions: candidate edges with p_add >= 0.5 ---
+        for canon, (cand_idx, p) in cand_seen.items():
+            s, d = canon
+            if int(ori_batch[s]) != g:
+                continue
+            if p >= 0.5 and canon not in ori_canon_set:
+                changes.append((float(p), "add", s, d))
+
+        # Unified ranking: sort by score descending, take top K
+        changes.sort(key=lambda x: x[0], reverse=True)
+        selected = changes[:topk]
+
+        # Separate selected changes back into deletions and additions
+        selected_del_indices = set()
+        selected_adds = []
+        for item in selected:
+            if item[1] == "del":
+                selected_del_indices.add(item[2])
+            else:
+                selected_adds.append((item[2], item[3]))  # (s, d)
+
+        # Keep original edges not selected for deletion
+        if g_ori_indices.numel() > 0:
+            keep_mask = torch.tensor(
+                [idx.item() not in selected_del_indices for idx in g_ori_indices],
+                dtype=torch.bool, device=device,
+            )
+            kept_indices = g_ori_indices[keep_mask]
+            if kept_indices.numel() > 0:
+                new_edge_parts.append(ori_edge_index[:, kept_indices])
+                new_weight_parts.append(p_keep[kept_indices])
+
+        # Add selected new edges (bidirectional)
+        for s, d in selected_adds:
+            new_edge_parts.append(
+                torch.tensor([[s, d], [d, s]], dtype=torch.long, device=device).t()
+            )
+            p = float(cand_seen[(min(s, d), max(s, d))][1])
+            w = torch.tensor([p, p], dtype=dtype, device=device)
+            new_weight_parts.append(w)
+
+    # Concatenate all edges
+    if new_edge_parts:
+        new_edge_index = torch.cat(new_edge_parts, dim=1)
+        new_edge_weight = torch.cat(new_weight_parts, dim=0)
+    else:
+        new_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+        new_edge_weight = torch.empty(0, dtype=dtype, device=device)
+
+    return {
+        **outputs,
+        "edge_index_cf": new_edge_index,
+        "edge_weight_cf": new_edge_weight,
+    }
+
+
 def evaluate(args, model, gnn, data_loader):
     model.eval()
 
@@ -108,8 +228,11 @@ def evaluate(args, model, gnn, data_loader):
     valid_cf = 0
     fidel_sum = 0.0
     sparsity_sum = 0.0
+    topk_fidel_sum = 0.0
     class_total = {0: 0, 1: 0}
     class_success = {0: 0, 1: 0}
+
+    topk_cf = getattr(args, "topk_cf", None)
 
     total = data_loader.dataset.__len__()
     total_cf_time = 0.0
@@ -128,6 +251,13 @@ def evaluate(args, model, gnn, data_loader):
                 subgraphs=subgraphs,
                 cond_labels=y_desired,
             )
+
+            # Apply top-K CF filter if enabled
+            if topk_cf is not None:
+                topk_outputs = _apply_topk_cf_filter(origraphs, outputs, topk_cf)
+            else:
+                topk_outputs = outputs
+
             total_cf_time += time.time() - t0
 
             visualize_explainer_graph(
@@ -193,6 +323,21 @@ def evaluate(args, model, gnn, data_loader):
                 gnn,
                 eval_graph_mode=eval_graph_mode,
             )
+
+            # Compute top-K CF fidelity if enabled
+            if topk_cf is not None:
+                if eval_graph_mode == "continuous":
+                    topk_cf_graphs = output_to_batch(origraphs, topk_outputs, use_hard=False)
+                else:
+                    topk_cf_graphs = output_to_batch(origraphs, topk_outputs, use_hard=True, thresh=0.5)
+                topk_fidel_sum += compute_fidelity_prob(
+                    args,
+                    origraphs,
+                    topk_cf_graphs,
+                    ori_prob_all[batch_idx],
+                    gnn,
+                    eval_graph_mode=eval_graph_mode,
+                )
             sparsity_sum += compute_sparsity(
                 args,
                 origraphs,
@@ -204,6 +349,7 @@ def evaluate(args, model, gnn, data_loader):
     sparsity = sparsity_sum / total if total > 0 else 0.0
     avg_proximity = proximity / total if total > 0 else 0.0
     fidelity = fidel_sum / total if total > 0 else 0.0
+    topk_cf_fidelity = topk_fidel_sum / total if total > 0 and topk_cf is not None else None
     avg_runtime_per_graph = total_cf_time / total if total > 0 else 0.0
     avg_oracle_calls_per_graph = wrapped_gnn.oracle_calls / total if total > 0 else 0.0
 
@@ -229,6 +375,7 @@ def evaluate(args, model, gnn, data_loader):
         "runtime": avg_runtime_per_graph,
         "oracle_calls": avg_oracle_calls_per_graph,
         "per_class_flip": per_class_flip,
+        "topk_cf_fidelity": topk_cf_fidelity,
     }
 
 

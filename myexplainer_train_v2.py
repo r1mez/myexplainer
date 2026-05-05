@@ -150,7 +150,7 @@ def parse_args():
 
     # 基础设置
     parser.add_argument('--cuda', type=int, default=0, help='GPU device')
-    parser.add_argument('--dataset', type=str, default='alkane_carbonyl', help='Dataset name')
+    parser.add_argument('--dataset', type=str, default='mutag188', help='Dataset name')
     parser.add_argument('--gnn_path', type=str, default='param/', help='GNN directory')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use (cpu or cuda)')
     parser.add_argument('--train_mode',type=bool,default=False,help='Current mode')
@@ -166,7 +166,7 @@ def parse_args():
         default=None,
         help='Subgraph sampling edge probability threshold; uses dataset-specific default when unset',
     )
-    parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
 
     # 模型参数
     # ba2: 128,32    mutag:256,32
@@ -178,7 +178,7 @@ def parse_args():
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
 
     # 训练参数
-    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=1000, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
     parser.add_argument(
@@ -201,6 +201,7 @@ def parse_args():
         help='Evaluation graph mode: thresholded discrete graph or continuous weighted graph',
     )
     parser.add_argument('--proto_topk', type=int, default=100, help='Top-K discriminative pattern families per class')
+    parser.add_argument('--topk_cf', type=int, default=None, help='Top-K edge changes (add+del) for counterfactual graph; None disables the constraint')
     parser.add_argument('--proto_refresh_every', type=int, default=5, help='Refresh prototypes every N epochs')
     parser.add_argument('--pattern_family_min_count', type=int, default=2,
                         help='Minimum generated samples needed to keep a pattern family candidate')
@@ -228,6 +229,8 @@ def main():
     for key in EXPLAINER_HPARAM_KEYS:
         print(f"  {key}: {getattr(args, key)}")
     print(f"Evaluation graph mode: {args.eval_graph_mode}")
+    if args.topk_cf is not None:
+        print(f"Top-K CF mode: enabled (K={args.topk_cf})")
 
     # 加载数据集
     print("\n1. Loading datasets...")
@@ -415,6 +418,23 @@ def main():
             evaluation_metrics["sparsity"]
         )
     )
+    print(
+        "  Runtime per graph (s) -> {:.6f}".format(
+            evaluation_metrics["runtime"]
+        )
+    )
+    print(
+        "  Oracle calls per graph -> {:.4f}".format(
+            evaluation_metrics["oracle_calls"]
+        )
+    )
+    if evaluation_metrics.get("topk_cf_fidelity") is not None:
+        print(
+            "  Top-{} CF Fidelity ↑: {:.4f}".format(
+                args.topk_cf,
+                evaluation_metrics["topk_cf_fidelity"],
+            )
+        )
 
     per_class_flip = evaluation_metrics.get("per_class_flip", {})
     for class_idx in [0, 1]:
