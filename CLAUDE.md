@@ -33,12 +33,29 @@ python -m models.clear
 
 No formal build system, test framework, or linter configuration exists. Seed is fixed to 42 via `set_seed(42)`.
 
-## Dependencies
+## Runtime Environment
 
-No `requirements.txt` or `pyproject.toml`. Install manually:
+本项目不在本机运行，而是在远程服务器上运行。Conda 环境名 `myexplainer`，Python 版本 3.9.21。
+
+No `requirements.txt` or `pyproject.toml`. Key dependencies with pinned versions:
 ```
-python >= 3.9, pytorch, torch-geometric, torch-scatter, numpy, scipy,
-scikit-learn, networkx, python-igraph, matplotlib, tqdm, pandas, rdkit
+python==3.9.21
+torch==1.10.1+cu113
+torch_geometric==2.0.4
+torch-scatter==2.0.9
+torch-sparse==0.6.13
+torch-cluster==1.6.0
+torch-spline-conv==1.2.1
+numpy==1.24.2
+scipy==1.10.1
+scikit-learn==1.4.1.post1
+networkx==3.0
+igraph==1.0.0
+matplotlib==3.7.0
+pandas==1.5.3
+rdkit==2025.3.6
+tqdm==4.67.1
+PyYAML==6.0.2
 ```
 
 ## Architecture

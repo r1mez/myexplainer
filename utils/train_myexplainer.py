@@ -192,18 +192,6 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
             print(f"  *** Saved Best Model (Val Loss: {best_val_loss:.4f}) ***")
 
 
-        # 定期保存checkpoint
-        if (epoch + 1) % 10 == 0:
-            checkpoint_path = f'param/myexplainer_{args.dataset.lower()}_epoch_{epoch + 1}.pt'
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': epoch_losses['total'],
-            }, checkpoint_path)
-            print(f"  Checkpoint saved to {checkpoint_path}")
-
-
     # 加载最佳模型
     model.load_state_dict(
         torch.load(best_ckpt_path, map_location=args.device),
