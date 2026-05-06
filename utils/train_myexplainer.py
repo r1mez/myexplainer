@@ -149,6 +149,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
             model.refresh_class_prototypes(prototype_bank)
 
         val_loss_accum = 0.0
+        val_cf_loss_accum = 0.0
         val_batches = 0
 
         with torch.no_grad():  # 不计算梯度
@@ -165,10 +166,12 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
                 loss_dict = model.compute_loss(args, origraphs, y_desired, outputs)
 
                 val_loss_accum += loss_dict["total"].item()
+                val_cf_loss_accum += loss_dict["cf"].item()
                 val_batches += 1
 
         # 计算验证集平均 Loss
         val_epoch_loss = val_loss_accum / val_batches if val_batches > 0 else 0.0
+        val_epoch_cf_loss = val_cf_loss_accum / val_batches if val_batches > 0 else 0.0
         losses['val_total'].append(val_epoch_loss)
 
         scheduler.step(val_epoch_loss)
@@ -178,18 +181,19 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
         print(f"\nEpoch {epoch + 1}/{epochs} Summary:")
         print(f"  Train Total Loss: {epoch_losses['total']:.4f}")
         print(f"  Val   Total Loss: {val_epoch_loss:.4f}")
+        print(f"  Val   CF   Loss: {val_epoch_cf_loss:.4f}")
         for loss_name, loss_value in epoch_losses.items():
             # Skip the mask loss if it's commented out in the original
             if loss_name != 'mask':
                 print(f"  {loss_name.replace('_', ' ').title()} Loss: {loss_value:.4f}")
 
 
-        # 保存最佳模型
-        if val_epoch_loss < best_val_loss:
-            best_val_loss = val_epoch_loss
+        # 保存最佳模型（基于验证集 CF Loss）
+        if val_epoch_cf_loss < best_val_loss:
+            best_val_loss = val_epoch_cf_loss
             best_epoch = epoch + 1
             torch.save(model.state_dict(), best_ckpt_path)
-            print(f"  *** Saved Best Model (Val Loss: {best_val_loss:.4f}) ***")
+            print(f"  *** Saved Best Model (Val CF Loss: {best_val_loss:.4f}) ***")
 
 
     # 加载最佳模型
