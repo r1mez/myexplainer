@@ -19,7 +19,7 @@ from tqdm import tqdm
 import igraph as ig
 
 class MappedDataset(Dataset):
-    def __init__(self, args, dataset, patterns, pred_labels = None, pred_probs = None, gnn = None, split_name="dataset"):
+    def __init__(self, args, dataset, patterns, pred_labels = None, pred_probs = None, gnn = None):
         """
         初始化GraphTrainData数据集
 
@@ -29,9 +29,8 @@ class MappedDataset(Dataset):
             pred_labels: 预训练GNN的分类结果
             patterns: 频繁子图的字典（{0：patterns_0, 1: patterns_1}）
         """
-        # 预先缓存 pattern 的 igraph 表示，避免为每个样本重复转换
-        self.patterns_0 = self._prepare_patterns(self._get_class_patterns(patterns, 0))
-        self.patterns_1 = self._prepare_patterns(self._get_class_patterns(patterns, 1))
+        self.patterns_0 = patterns[0]
+        self.patterns_1 = patterns[1]
         self.device = args.device
         self.graphs = []  # 存储所有单个图
         self.subgraphs = []  # 存储所有图的频繁子图
@@ -39,12 +38,8 @@ class MappedDataset(Dataset):
         self.probs = pred_probs  # 存储GNN预测的概率
         self.sub_masks = []  # 预计算的频繁子图掩码
         self.dataset_name = args.dataset
-        self.split_name = split_name
         self.thresh = args.threshold
         self.args = args
-        self.match_success_flags = []
-        self.match_success_count = 0
-        self.match_success_ratio = 0.0
         if self.labels is None and self.probs is None:
             self._predict_label(args, dataset, gnn)
         # 预处理：从dataloader中提取所有图并进行预测
@@ -57,42 +52,10 @@ class MappedDataset(Dataset):
         print(f"  length of sub_masks: {len(self.sub_masks)}")
         print(f"  length of graphs: {len(self.graphs)}")
         print(f"  length of subgraphs: {len(self.subgraphs)}")
-        print(
-            f"  Subgraph matching success rate ({self.split_name}): "
-            f"{self.match_success_count}/{len(self.graphs)} "
-            f"({self.match_success_ratio:.2%})"
-        )
 
     def _process_graphs(self, dataset):
         for data in dataset:
             self.graphs.append(data)
-
-    def _get_class_patterns(self, patterns, class_idx):
-        if patterns is None:
-            return []
-        if isinstance(patterns, dict):
-            return patterns.get(class_idx, [])
-        if 0 <= class_idx < len(patterns):
-            return patterns[class_idx]
-        return []
-
-    def _pattern_to_nx(self, pattern_item):
-        if isinstance(pattern_item, dict):
-            return pattern_item.get("representative_nx")
-        return pattern_item
-
-    def _prepare_patterns(self, patterns):
-        prepared_patterns = []
-        for pattern_item in patterns:
-            pattern_nx = self._pattern_to_nx(pattern_item)
-            if pattern_nx is None or pattern_nx.number_of_nodes() == 0:
-                continue
-            prepared_patterns.append({
-                "nx": pattern_nx,
-                "ig": nx_to_igraph(pattern_nx),
-                "meta": pattern_item if isinstance(pattern_item, dict) else None,
-            })
-        return prepared_patterns
 
     def _precompute_masks(self):
         """
@@ -102,20 +65,13 @@ class MappedDataset(Dataset):
         for idx in tqdm(range(len(self.graphs)), desc="  Computing masks"):
             graph = self.graphs[idx]
 
-            label = self.labels[idx]
-            if isinstance(label, torch.Tensor):
-                label = int(label.item())
-            else:
-                label = int(label)
-
-            if label == 0:
+            if self.labels[idx] == 0:
                 patterns = self.patterns_0
             else:
                 patterns = self.patterns_1
 
             graph_nx = to_networkx(graph, node_attrs=['x']).to_undirected()
-            subgraph_nx, is_matched = self._find_largest_subgraph(graph_nx, patterns)
-            self.match_success_flags.append(is_matched)
+            subgraph_nx = self._find_largest_subgraph(graph_nx, patterns)
 
 
             subgraph = from_networkx(subgraph_nx)
@@ -123,10 +79,6 @@ class MappedDataset(Dataset):
 
             subgraph.node_mappings = torch.tensor(node_mappings)
             self.subgraphs.append(subgraph)
-
-        self.match_success_count = sum(self.match_success_flags)
-        if self.graphs:
-            self.match_success_ratio = self.match_success_count / len(self.graphs)
 
     def _graph_padding(self, num_nodes, graphs):
         padded_graphs = []
@@ -158,43 +110,40 @@ class MappedDataset(Dataset):
         """
         # 1. 先把当前大图 graph_nx 转成 igraph.Graph
         g_ig = nx_to_igraph(graph_nx)
-        graph_colors = g_ig.vs["node_color"] if "node_color" in g_ig.vs.attributes() else None
 
         best_match_vertices = None  # 记录在大图中的匹配顶点（ig 的顶点 id）
 
         # 假设 patterns 已经按“从大到小”排序（你原来就是这么设计的）
-        for pattern in patterns:
-            p_ig = pattern["ig"]
-            pattern_colors = p_ig.vs["node_color"] if "node_color" in p_ig.vs.attributes() else None
+        for pattern_nx in patterns:
+            # 2. 每个 pattern 也转成 igraph.Graph
+            p_ig = nx_to_igraph(pattern_nx)
 
-            # 2. 先用带节点类型约束的 VF2 做存在性判断，并直接返回首个映射
-            #    这里只需要一个匹配，不再枚举全部匹配结果。
-            is_match, _, mapping_21 = g_ig.subisomorphic_vf2(
-                p_ig,
-                color1=graph_colors,
-                color2=pattern_colors,
-                return_mapping_21=True,
-            )
+            # 3. 用 VF2 搜索所有子图同构映射
+            #    调用形式：target.get_subisomorphisms_vf2(pattern)
+            #    返回的是一个 list，每个元素是一个长度为 vcount(pattern) 的顶点 id 列表
+            mappings = g_ig.get_subisomorphisms_vf2(p_ig)
 
-            if not is_match or mapping_21 is None:
+            if not mappings:
                 # 这个 pattern 没有匹配，换下一个 pattern
                 continue
+            # else:
+            #     print("  Found a match!")
 
             # 因为 patterns 假定已经按 size 从大到小排过，
             # 找到的第一个 pattern 就是“最大”的，直接拿这个匹配即可
-            best_match_vertices = mapping_21  # pattern 顶点 -> graph 顶点
+            best_match_vertices = mappings[0]  # 比如 [3, 7, 10, 11] 这样的 igraph 顶点 id
             break
 
         # 4. 如果一个 pattern 都没匹配上，就退回原图
         if best_match_vertices is None:
-            return graph_nx, False
+            return graph_nx
 
         # 5. 把 igraph 的顶点 id 映射回原来 networkx 的 node id
         matched_nodes = [g_ig.vs[v]["orig_id"] for v in best_match_vertices]
 
         # 6. 用这些 node id 从 graph_nx 里抽子图，保持原有属性
         subgraph = graph_nx.subgraph(matched_nodes).copy()
-        return subgraph, True
+        return subgraph
 
     def _predict_label(self, args, dataset, model):
         """使用预训练GNN模型预测图的标签和概率"""
@@ -293,7 +242,7 @@ def train_collate_fn(batch):
 
 def nx_to_igraph(g_nx: nx.Graph) -> ig.Graph:
     """
-    把 networkx.Graph 转成 igraph.Graph，并缓存用于 VF2 剪枝的节点颜色。
+    把 networkx.Graph 转成 igraph.Graph，并在 vertex 属性里保存原始 node id
     """
     # 固定一个节点顺序，给每个 nx 节点分配一个连续的 0..n-1 下标
     g_nx = remove_self_loops(g_nx)
@@ -303,40 +252,11 @@ def nx_to_igraph(g_nx: nx.Graph) -> ig.Graph:
     # 用这些下标来建 igraph 的边
     edges = [(node_index[u], node_index[v]) for u, v in g_nx.edges()]
 
-    g_ig = ig.Graph(n=len(nodes), edges=edges, directed=g_nx.is_directed())
+    g_ig = ig.Graph(edges=edges, directed=g_nx.is_directed())
     # 把原始的 node id 存在属性里，后面再映射回来
     g_ig.vs["orig_id"] = nodes
-    g_ig.vs["node_color"] = [_infer_node_color(g_nx.nodes[node]) for node in nodes]
 
     return g_ig
-
-
-def _infer_node_color(node_attrs) -> int:
-    """
-    为 VF2 提供节点颜色约束。
-    对 one-hot / 概率向量使用 argmax；对标量则直接取整。
-    """
-    if "type" in node_attrs:
-        return int(node_attrs["type"])
-
-    x = node_attrs.get("x")
-    if x is None:
-        return -1
-
-    if isinstance(x, torch.Tensor):
-        x = x.detach().cpu().numpy()
-    elif isinstance(x, list):
-        x = np.asarray(x)
-
-    if np.isscalar(x):
-        return int(x)
-
-    x = np.asarray(x).reshape(-1)
-    if x.size == 0:
-        return -1
-    if x.size == 1:
-        return int(round(float(x[0])))
-    return int(np.argmax(x))
 
 def remove_self_loops(g: nx.Graph) -> nx.Graph:
     """返回一个拷贝，并去掉所有自环边（u,u）"""

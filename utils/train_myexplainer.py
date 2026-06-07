@@ -3,7 +3,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from utils.vis_utils import visualize_explainer_graph
 
-def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, scheduler, prototype_bank=None, epochs=30):
+def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, scheduler, epochs=30):
     # 记录损失历史
     losses = {
         'total': [],
@@ -13,18 +13,11 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
         # 'edit_outside': [],
         'cf': [],
         'kl': [],
-        'proto': [],
-        'oracle_del_rank': [],
         'val_total': []
     }
 
     best_val_loss = float('inf')
     best_epoch = 0
-    proto_refresh_every = max(1, int(getattr(args, "proto_refresh_every", 5)))
-    best_ckpt_path = f'param/myexplainer_{args.dataset.lower()}_best.pt'
-
-    if prototype_bank is not None:
-        model.refresh_class_prototypes(prototype_bank)
 
 
     y_desired_cache = []
@@ -48,8 +41,6 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
             # 'edit_outside': 0.0,
             'cf': 0.0,
             'kl': 0.0,
-            'proto': 0.0,
-            'oracle_del_rank': 0.0,
         }
 
         num_batches = 0
@@ -79,16 +70,11 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
             #     y_desired=y_desired.view(-1, 1),
             #     edge_attr=getattr(origraphs, 'edge_attr', None)
             # )
-            outputs = model(origraphs, subgraphs, cond_labels=y_desired)
+            outputs = model(origraphs, subgraphs)
             loss_dict = model.compute_loss(args, origraphs, y_desired, outputs)
 
             if batch_idx in [0,1,2,3,4]:
-                visualize_explainer_graph(
-                    origraphs,
-                    y_desired,
-                    outputs,
-                    dataset_name=args.dataset,
-                )
+                visualize_explainer_graph(origraphs, y_desired, outputs)
 
 
 
@@ -135,8 +121,6 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
                 # 'edit_outside': f'{loss_dict["edit_outside"]:.4f}',
                 'cf': f'{loss_dict["cf"]:.4f}',
                 'kl': f'{loss_dict["kl"]:.4f}',
-                'proto': f'{loss_dict["proto"]:.4f}',
-                'oracle_del_rank': f'{loss_dict["oracle_del_rank"]:.4f}',
             })
 
         # 计算epoch平均损失
@@ -145,11 +129,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
             losses[key].append(epoch_losses[key])
 
         model.eval()  # 切换到评估模式
-        if prototype_bank is not None and (epoch + 1) % proto_refresh_every == 0:
-            model.refresh_class_prototypes(prototype_bank)
-
         val_loss_accum = 0.0
-        val_cf_loss_accum = 0.0
         val_batches = 0
 
         with torch.no_grad():  # 不计算梯度
@@ -162,16 +142,14 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
                 ori_pred = ori_pred_logits.argmax(dim=1)
                 y_desired = (1 - ori_pred).float().unsqueeze(1)
 
-                outputs = model(origraphs, subgraphs, cond_labels=y_desired)
+                outputs = model(origraphs, subgraphs)
                 loss_dict = model.compute_loss(args, origraphs, y_desired, outputs)
 
                 val_loss_accum += loss_dict["total"].item()
-                val_cf_loss_accum += loss_dict["cf"].item()
                 val_batches += 1
 
         # 计算验证集平均 Loss
         val_epoch_loss = val_loss_accum / val_batches if val_batches > 0 else 0.0
-        val_epoch_cf_loss = val_cf_loss_accum / val_batches if val_batches > 0 else 0.0
         losses['val_total'].append(val_epoch_loss)
 
         scheduler.step(val_epoch_loss)
@@ -181,28 +159,34 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
         print(f"\nEpoch {epoch + 1}/{epochs} Summary:")
         print(f"  Train Total Loss: {epoch_losses['total']:.4f}")
         print(f"  Val   Total Loss: {val_epoch_loss:.4f}")
-        print(f"  Val   CF   Loss: {val_epoch_cf_loss:.4f}")
         for loss_name, loss_value in epoch_losses.items():
             # Skip the mask loss if it's commented out in the original
             if loss_name != 'mask':
                 print(f"  {loss_name.replace('_', ' ').title()} Loss: {loss_value:.4f}")
 
 
-        # 保存最佳模型（基于验证集 CF Loss）
-        if val_epoch_cf_loss < best_val_loss:
-            best_val_loss = val_epoch_cf_loss
+        # 保存最佳模型
+        if val_epoch_loss < best_val_loss:
+            best_val_loss = val_epoch_loss
             best_epoch = epoch + 1
-            torch.save(model.state_dict(), best_ckpt_path)
-            print(f"  *** Saved Best Model (Val CF Loss: {best_val_loss:.4f}) ***")
+            torch.save(model.state_dict(), f'param/myexplainer_{args.dataset}_best.pt')
+            print(f"  *** Saved Best Model (Val Loss: {best_val_loss:.4f}) ***")
+
+
+        # 定期保存checkpoint
+        if (epoch + 1) % 10 == 0:
+            checkpoint_path = f'param/myexplainer_{args.dataset}_epoch_{epoch + 1}.pt'
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': epoch_losses['total'],
+            }, checkpoint_path)
+            print(f"  Checkpoint saved to {checkpoint_path}")
 
 
     # 加载最佳模型
-    model.load_state_dict(
-        torch.load(best_ckpt_path, map_location=args.device),
-        strict=False
-    )
-    if prototype_bank is not None:
-        model.refresh_class_prototypes(prototype_bank)
+    model.load_state_dict(torch.load(f'param/myexplainer_{args.dataset}_best.pt'))
     print("\nTraining completed! Loaded best model.")
     print(f"Best model from epoch {best_epoch} with loss {best_val_loss:.4f}")
 
@@ -227,7 +211,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
     # plt.close()
 
     epochs_range = range(1, epochs + 1)
-    loss_types = ['total', 'recon', 'kl', 'cf', 'proto', 'val_total']
+    loss_types = ['total', 'recon', 'kl', 'cf','val_total']
 
     for loss_type in loss_types:
         plt.figure(figsize=(10, 6))
