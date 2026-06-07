@@ -1,411 +1,45 @@
 import os
 import pickle
-from functools import lru_cache
 
 import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
 import torch
 from torch.distributions import Categorical
-from torch_geometric.utils import to_networkx
-import igraph as ig
-
-from graph_editor.metadata import feature_labels_for_dataset, normalize_dataset_name
-
-
-DATASET_SUBGRAPH_SAMPLE_THRESHOLDS = {
-    "ba2motif": 0.97,
-    "mutag": 0.70,
-    "mutag188": 0.80,
-    "benzene": 0.70,
-    "proteins": 0.70,
-    "alkane_carbonyl": 0.70,
-    "fluoride_carbonyl": 0.70,
-    "nci1": 0.15,
-}
-
-
-@lru_cache(maxsize=None)
-def _dataset_node_type_labels(dataset_name, num_node_features):
-    dataset_key = normalize_dataset_name(dataset_name or "")
-    if dataset_key == "__legacy_proteins_branch__":
-        dataset_key = "proteins"
-    labels = feature_labels_for_dataset(dataset_key, int(num_node_features), "onehot")
-
-    if dataset_key == "nci1":
-        return tuple(f"T{idx + 1}" for idx in range(int(num_node_features)))
-    if dataset_key == "proteins":
-        return tuple(f"P{idx}" for idx in range(int(num_node_features)))
-
-    return tuple(str(label) for label in labels)
-
-
-def _pattern_node_label(dataset_name, feat_idx, num_node_features):
-    labels = _dataset_node_type_labels(dataset_name, num_node_features)
-    if 0 <= feat_idx < len(labels):
-        return labels[feat_idx]
-    return str(feat_idx)
-
-
-def _infer_node_color(node_attrs) -> int:
-    if "type" in node_attrs:
-        return int(node_attrs["type"])
-
-    x = node_attrs.get("x")
-    if x is None:
-        return -1
-
-    if isinstance(x, torch.Tensor):
-        x = x.detach().cpu().numpy()
-    elif isinstance(x, list):
-        x = np.asarray(x)
-
-    if np.isscalar(x):
-        return int(x)
-
-    x = np.asarray(x).reshape(-1)
-    if x.size == 0:
-        return -1
-    if x.size == 1:
-        return int(round(float(x[0])))
-    return int(np.argmax(x))
-
-
-def _remove_self_loops(g: nx.Graph) -> nx.Graph:
-    g2 = g.copy()
-    g2.remove_edges_from(nx.selfloop_edges(g2))
-    return g2
-
-
-def _normalize_pattern_graph(g: nx.Graph) -> nx.Graph:
-    g_norm = _remove_self_loops(g.to_undirected() if g.is_directed() else g)
-    g_norm = g_norm.copy()
-    for node in g_norm.nodes():
-        g_norm.nodes[node]["_node_color"] = _infer_node_color(g_norm.nodes[node])
-    return g_norm
-
-
-def _pattern_signature(g: nx.Graph):
-    g_norm = _normalize_pattern_graph(g)
-    colors = [_infer_node_color(g_norm.nodes[node]) for node in g_norm.nodes()]
-    color_degree = [
-        (_infer_node_color(g_norm.nodes[node]), int(g_norm.degree[node]))
-        for node in g_norm.nodes()
-    ]
-    return (
-        g_norm.number_of_nodes(),
-        g_norm.number_of_edges(),
-        tuple(sorted(colors)),
-        tuple(sorted(color_degree)),
-    )
-
-
-def _node_color_match(attrs_a, attrs_b) -> bool:
-    return _infer_node_color(attrs_a) == _infer_node_color(attrs_b)
-
-
-def _are_isomorphic(g_a: nx.Graph, g_b: nx.Graph) -> bool:
-    if g_a.number_of_nodes() != g_b.number_of_nodes():
-        return False
-    if g_a.number_of_edges() != g_b.number_of_edges():
-        return False
-    return nx.is_isomorphic(g_a, g_b, node_match=_node_color_match)
-
-
-def _build_pattern_families(patterns):
-    families = []
-    buckets = {}
-
-    for pattern in patterns:
-        if pattern is None or pattern.number_of_nodes() == 0:
-            continue
-
-        pattern_norm = _normalize_pattern_graph(pattern)
-        signature = _pattern_signature(pattern_norm)
-        matched_family_idx = None
-
-        for family_idx in buckets.get(signature, []):
-            family = families[family_idx]
-            if _are_isomorphic(pattern_norm, family["representative_nx"]):
-                matched_family_idx = family_idx
-                break
-
-        if matched_family_idx is None:
-            family = {
-                "representative_nx": pattern_norm,
-                "generated_count": 1,
-                "num_nodes": pattern_norm.number_of_nodes(),
-                "density": nx.density(pattern_norm) if pattern_norm.number_of_nodes() > 1 else 0.0,
-                "in_class_match_count": 0,
-                "out_class_match_count": 0,
-                "in_class_support": 0.0,
-                "out_class_support": 0.0,
-                "score": 0.0,
-            }
-            families.append(family)
-            buckets.setdefault(signature, []).append(len(families) - 1)
-        else:
-            families[matched_family_idx]["generated_count"] += 1
-
-    return families
-
-
-def _data_to_matching_igraph(data):
-    g_nx = to_networkx(data, node_attrs=["x"]).to_undirected()
-    return _nx_to_igraph(g_nx)
-
-
-def _nx_to_igraph(g_nx: nx.Graph) -> ig.Graph:
-    g_nx = _remove_self_loops(g_nx.to_undirected() if g_nx.is_directed() else g_nx)
-    nodes = list(g_nx.nodes())
-    node_index = {node: i for i, node in enumerate(nodes)}
-    edges = [(node_index[u], node_index[v]) for u, v in g_nx.edges()]
-
-    g_ig = ig.Graph(n=len(nodes), edges=edges, directed=False)
-    g_ig.vs["node_color"] = [_infer_node_color(g_nx.nodes[node]) for node in nodes]
-    return g_ig
-
-
-def _has_subgraph_match(graph_ig, pattern_ig) -> bool:
-    if pattern_ig.vcount() == 0:
-        return False
-    if graph_ig.vcount() < pattern_ig.vcount() or graph_ig.ecount() < pattern_ig.ecount():
-        return False
-
-    graph_colors = graph_ig.vs["node_color"] if "node_color" in graph_ig.vs.attributes() else None
-    pattern_colors = pattern_ig.vs["node_color"] if "node_color" in pattern_ig.vs.attributes() else None
-    is_match, _, _ = graph_ig.subisomorphic_vf2(
-        pattern_ig,
-        color1=graph_colors,
-        color2=pattern_colors,
-        return_mapping_21=True,
-    )
-    return bool(is_match)
-
-
-def _count_graph_support(pattern_nx, graph_igs) -> int:
-    pattern_ig = _nx_to_igraph(pattern_nx)
-    return sum(1 for graph_ig in graph_igs if _has_subgraph_match(graph_ig, pattern_ig))
-
-
-def _score_pattern_families(families, class_idx, datasets):
-    in_dataset = datasets.get(class_idx, [])
-    out_dataset = []
-    for other_class, class_dataset in datasets.items():
-        if other_class != class_idx:
-            out_dataset.extend(list(class_dataset))
-
-    in_graphs = [_data_to_matching_igraph(data) for data in in_dataset]
-    out_graphs = [_data_to_matching_igraph(data) for data in out_dataset]
-
-    in_total = max(len(in_graphs), 1)
-    out_total = max(len(out_graphs), 1)
-
-    for family in families:
-        representative = family["representative_nx"]
-        in_count = _count_graph_support(representative, in_graphs)
-        out_count = _count_graph_support(representative, out_graphs)
-        in_support = in_count / in_total
-        out_support = out_count / out_total
-
-        family["in_class_match_count"] = in_count
-        family["out_class_match_count"] = out_count
-        family["in_class_support"] = in_support
-        family["out_class_support"] = out_support
-        family["score"] = in_support - out_support
-
-    return families
-
-
-def _filter_and_sort_families(families, args):
-    min_count = max(1, int(getattr(args, "pattern_family_min_count", 2)))
-    min_support = float(getattr(args, "pattern_min_support", 0.05))
-    topk = int(getattr(args, "proto_topk", len(families)))
-
-    def sort_key(family):
-        return (
-            family["score"],
-            family["generated_count"],
-            family["num_nodes"],
-            family["density"],
-        )
-
-    eligible = [
-        family for family in families
-        if family["generated_count"] >= min_count and family["in_class_support"] >= min_support
-    ]
-
-    if not eligible:
-        eligible = families
-
-    eligible.sort(key=sort_key, reverse=True)
-    return eligible[:topk]
-
-
-def _make_discriminative_families(raw_patterns, datasets, args):
-    result = {}
-    for class_idx, class_patterns in raw_patterns.items():
-        families = _build_pattern_families(class_patterns)
-        families = _score_pattern_families(families, class_idx, datasets)
-        selected_families = _filter_and_sort_families(families, args)
-        result[class_idx] = selected_families
-        print(
-            f"  Class {class_idx} patterns: raw={len(class_patterns)}, "
-            f"families={len(families)}, selected={len(selected_families)}"
-        )
-    return result
-
-
-def _resolve_subgraph_sample_threshold(args, dataset_name, historical_default):
-    explicit_threshold = getattr(args, "subgraph_sample_threshold", None)
-    if explicit_threshold is not None:
-        return float(explicit_threshold)
-    return float(
-        DATASET_SUBGRAPH_SAMPLE_THRESHOLDS.get(dataset_name, historical_default)
-    )
-
-
-def _sample_discrete_patterns(class_zero_dataset, class_one_dataset, num_samples, threshold, dataset_name=None):
-    patterns_0 = []
-    patterns_1 = []
-
-    if len(class_zero_dataset) == 0 or len(class_one_dataset) == 0:
-        return patterns_0, patterns_1
-
-    feature_dim = max(
-        max((int(d.x.shape[1]) for d in class_zero_dataset), default=1),
-        max((int(d.x.shape[1]) for d in class_one_dataset), default=1),
-    )
-    max_nodes_0 = max((int(d.num_nodes) for d in class_zero_dataset), default=1)
-    max_nodes_1 = max((int(d.num_nodes) for d in class_one_dataset), default=1)
-
-    X, Adj = GraphRepModelDiscrete(class_zero_dataset, max_nodes_0)
-    for _ in range(num_samples):
-        patterns_0.append(
-            graphsamplerDiscrete(
-                max_nodes_0,
-                X,
-                Adj,
-                threshold=threshold,
-                num_node_features=feature_dim,
-                dataset_name=dataset_name,
-                visualize=True,
-            )
-        )
-
-    X, Adj = GraphRepModelDiscrete(class_one_dataset, max_nodes_1)
-    for _ in range(num_samples):
-        patterns_1.append(
-            graphsamplerDiscrete(
-                max_nodes_1,
-                X,
-                Adj,
-                threshold=threshold,
-                num_node_features=feature_dim,
-                dataset_name=dataset_name,
-                visualize=True,
-            )
-        )
-
-    return patterns_0, patterns_1
 
 
 def subgraph_mining(args,datasets):
-    dataset_name = args.dataset.lower()
     if args.subgraph_method == 'genGraphEx':
         patterns_0 = []
         patterns_1 = []
-        if dataset_name == 'ba2motif':
-            sample_threshold = _resolve_subgraph_sample_threshold(args, dataset_name, 0.97)
-            print(
-                f"  Using subgraph sample threshold {sample_threshold:.2f} "
-                f"for dataset '{dataset_name}'"
-            )
+        if args.dataset == 'ba2motif':
             Bdist, mean_estimate, result, Adj = GraphRepModel(datasets[0],25)
             for i in range(50):
-                patterns_0.append(
-                    graphsampler(
-                        25,
-                        Bdist,
-                        mean_estimate,
-                        result,
-                        Adj,
-                        threshold=sample_threshold,
-                    )
-                )
+                patterns_0.append(graphsampler(25,Bdist, mean_estimate, result, Adj))
 
             Bdist, mean_estimate, result, Adj = GraphRepModel(datasets[1],25)
             for i in range(50):
-                patterns_1.append(
-                    graphsampler(
-                        25,
-                        Bdist,
-                        mean_estimate,
-                        result,
-                        Adj,
-                        threshold=sample_threshold,
-                    )
-                )
-        elif dataset_name in {'mutag', 'mutag188', 'benzene', 'proteins', 'alkane_carbonyl', 'fluoride_carbonyl'}:
-            sample_threshold = _resolve_subgraph_sample_threshold(args, dataset_name, 0.70)
-            print(
-                f"  Using subgraph sample threshold {sample_threshold:.2f} "
-                f"for dataset '{dataset_name}'"
-            )
-            patterns_0, patterns_1 = _sample_discrete_patterns(
-                datasets[0], datasets[1], num_samples=100, threshold=sample_threshold, dataset_name=dataset_name
-            )
-        elif dataset_name == 'nci1':
-            sample_threshold = _resolve_subgraph_sample_threshold(args, dataset_name, 0.70)
-            print(
-                f"  Using subgraph sample threshold {sample_threshold:.2f} "
-                f"for dataset '{dataset_name}'"
-            )
-            patterns_0, patterns_1 = _sample_discrete_patterns(
-                datasets[0], datasets[1], num_samples=10000, threshold=sample_threshold, dataset_name=dataset_name
-            )
-        elif dataset_name == '__legacy_proteins_branch__':
-            sample_threshold = _resolve_subgraph_sample_threshold(args, dataset_name, 0.70)
-            print(
-                f"  Using subgraph sample threshold {sample_threshold:.2f} "
-                f"for dataset '{dataset_name}'"
-            )
-            # 槽位行数 N 须 ≥ 该类内最大节点数，否则 X[j] 行越界（PROTEINS 常有图 >75 节点）
-            nf0 = max((int(d.x.shape[1]) for d in datasets[0]), default=1)
-            nf1 = max((int(d.x.shape[1]) for d in datasets[1]), default=1)
-            nf = max(nf0, nf1)
-            N0 = max((int(d.num_nodes) for d in datasets[0]), default=1)
-            N1 = max((int(d.num_nodes) for d in datasets[1]), default=1)
-            X, Adj = GraphRepModelDiscrete(datasets[0], N0)
+                patterns_1.append(graphsampler(25,Bdist, mean_estimate, result, Adj))
+        # mutag 417, nci1 111
+        if args.dataset == 'mutag' or args.dataset == 'nci1':
+            X, Adj = GraphRepModelDiscrete(datasets[0],417)
             for i in range(100):
-                patterns_0.append(
-                    graphsamplerDiscrete(
-                        N0,
-                        X,
-                        Adj,
-                        threshold=sample_threshold,
-                        num_node_features=nf,
-                        dataset_name=dataset_name,
-                    )
-                )
-            X, Adj = GraphRepModelDiscrete(datasets[1], N1)
+                patterns_0.append(graphsamplerDiscrete(417,X, Adj))
+            X, Adj = GraphRepModelDiscrete(datasets[1],417)
             for i in range(100):
-                patterns_1.append(
-                    graphsamplerDiscrete(
-                        N1,
-                        X,
-                        Adj,
-                        threshold=sample_threshold,
-                        num_node_features=nf,
-                        dataset_name=dataset_name,
-                    )
-                )
+                patterns_1.append(graphsamplerDiscrete(417,X, Adj))
+        if args.dataset == 'nci1':
+            X, Adj = GraphRepModelDiscrete(datasets[0],111)
+            for i in range(100):
+                patterns_0.append(graphsamplerDiscrete(111,X, Adj))
+            X, Adj = GraphRepModelDiscrete(datasets[1],111)
+            for i in range(100):
+                patterns_1.append(graphsamplerDiscrete(111,X, Adj))
         # 对patterns中的所有图按照key1(节点数)和key2(度数)进行排序
         sort_key = lambda G: (G.number_of_nodes(), nx.density(G))
         patterns_0.sort(key=sort_key, reverse=True)
         patterns_1.sort(key=sort_key, reverse=True)
-        raw_patterns = {0: patterns_0, 1: patterns_1}
-        return _make_discriminative_families(raw_patterns, datasets, args)
+        return {0: patterns_0, 1: patterns_1}
 
 # # 连续节点特征
 def GraphRepModel(classdata,N):
@@ -488,7 +122,7 @@ def GraphRepModel(classdata,N):
     Adj=Adj/numgraphs
     return Bdist, mean_estimate, result, Adj
 
-def graphsampler(N, Bdist, mean_estimate, result, Adj, threshold=0.97, visualize=True):
+def graphsampler(N, Bdist, mean_estimate, result, Adj, threshold=0.97):
     """
     Gen-GraphEx 生成器（集成阈值过滤版）
 
@@ -572,15 +206,13 @@ def graphsampler(N, Bdist, mean_estimate, result, Adj, threshold=0.97, visualize
     # G = nx.convert_node_labels_to_integers(G)
 
     # --- 绘图 (可选) ---
-    if visualize:
-        # 使用 spring_layout 布局，seed 固定以保证结果可复现
-        plt.figure(figsize=(6, 6))
-        pos = nx.spring_layout(G, seed=42)
-        nx.draw_networkx(G, pos=pos, node_size=50, node_color='red',
-                         edge_color='gray', with_labels=True, width=1.5)
-        plt.title(f"Generated Graph (Threshold={threshold})")
-        plt.show()
-        plt.close()
+    # 使用 spring_layout 布局，seed 固定以保证结果可复现
+    plt.figure(figsize=(6, 6))
+    pos = nx.spring_layout(G, seed=42)
+    nx.draw_networkx(G, pos=pos, node_size=50, node_color='red',
+                     edge_color='gray', with_labels=True, width=1.5)
+    plt.title(f"Generated Graph (Threshold={threshold})")
+    plt.show()
 
     return G
 
@@ -592,43 +224,44 @@ def GraphRepModelDiscrete(targetclass, N=111):
     Gen-GraphEx 图表示模型（通用适配版）
     自动适配 targetclass 中的特征维度。
     """
-    if len(targetclass) == 0:
-        return np.zeros((N, 1)), np.zeros((N, N))
+    # 1. 自动获取特征维度 (例如 37)
+    # 假设 targetclass[0].x 是 [nodes, features]
+    real_num_types = targetclass[0].x.shape[1]
 
-    # 列：one-hot 维数取子集最大值（与同集内维数一致时与「只看首图」等价）
-    feat_dim = max(int(d.x.shape[1]) for d in targetclass)
-    num_cols = feat_dim + 1  # 第 0 列为空槽位，1..feat_dim 为类别
-
-    X = np.zeros((N, num_cols))
+    # 2. 初始化矩阵：列数需要 +1 (因为第0列预留给"节点不存在")
+    # X 的形状变为 [N, 37 + 1]
+    X = np.zeros((N, real_num_types + 1))
     Adj = np.zeros((N, N))
 
-    print(f"Detected feat_dim={feat_dim}, slot_rows N={N}. X matrix shape: {X.shape}")
+    print(f"Detected {real_num_types} node types. X matrix shape: {X.shape}")
     print(f"Processing {len(targetclass)} graphs...")
 
     # --- 统计节点分布 ---
     for i in range(len(targetclass)):
         data = targetclass[i]
 
+        # One-Hot -> Index (0 ~ 36)
         if data.x.shape[1] > 1:
             x_indices = torch.argmax(data.x, dim=1)
         else:
             x_indices = data.x.squeeze()
 
-        x_indices = x_indices + 1  # 映射到列 1..feat_dim
+        # 偏移索引：0 预留给"不存在"，所以原子类型变为 1 ~ 37
+        x_indices = x_indices + 1
 
+        # 统计
         current_num_nodes = len(x_indices)
-        # 行 j 表示「第 j 个槽位」：仅统计前 N 个节点，避免图节点数 > N 时 X[j] 行越界
-        slot_nodes = min(current_num_nodes, N)
-        for j in range(slot_nodes):
-            type_idx = int(x_indices[j].item())
-            if 0 <= type_idx < num_cols:
+        for j in range(current_num_nodes):
+            type_idx = x_indices[j].item()
+            # 只要索引在合法范围内 (0 ~ 37)，都进行统计
+            if type_idx <= real_num_types:
                 X[j][type_idx] += 1
 
-        # 槽位 slot_nodes..N-1 视为「该图在此位置无节点」
-        for k in range(slot_nodes, N):
+        # 填充不存在的节点 (Type 0)
+        for k in range(current_num_nodes, N):
             X[k][0] += 1
 
-    # --- 统计边分布 ---
+            # --- 统计边分布 (保持不变) ---
     for i in range(len(targetclass)):
         data = targetclass[i]
         adj = data.edge_index
@@ -648,15 +281,7 @@ def GraphRepModelDiscrete(targetclass, N=111):
     return X, Adj
 
 
-def graphsamplerDiscrete(
-    N,
-    X,
-    Adj,
-    threshold=0.7,
-    num_node_features=37,
-    dataset_name=None,
-    visualize=False,
-):
+def graphsamplerDiscrete(N, X, Adj, threshold=0.1, num_node_features=37):
     """
     Gen-GraphEx 生成器（通用适配版）
 
@@ -711,17 +336,13 @@ def graphsamplerDiscrete(
         # 安全赋值
         if 0 <= feat_idx < num_node_features:
             one_hot[feat_idx] = 1.0
-            label_text = _pattern_node_label(dataset_name, feat_idx, num_node_features)
+            # 既然没有原子映射表，直接显示类型ID
+            label_text = f"{feat_idx}"
         else:
-            raise ValueError(
-                f"Sampled node feature index {feat_idx} is out of range for "
-                f"num_node_features={num_node_features}"
-            )
+            label_text = "?"
 
-        G.nodes[i]['type'] = feat_idx
+        G.nodes[i]['type'] = type_idx
         G.nodes[i]['x'] = one_hot
-        if 0 <= feat_idx < num_node_features and int(np.argmax(one_hot)) != G.nodes[i]['type']:
-            raise AssertionError("Pattern node type must match argmax(node['x'])")
         G.nodes[i]['label_name'] = label_text  # 存入临时属性
 
     # 保留最大连通子图
@@ -730,19 +351,19 @@ def graphsamplerDiscrete(
         G = G.subgraph(largest_cc_nodes).copy()
         G = nx.convert_node_labels_to_integers(G)
 
+    # 准备绘图标签
+    node_labels = {i: G.nodes[i].get('label_name', '?') for i in G.nodes()}
+
     # --- 6. 可视化 ---
-    if visualize:
-        node_labels = {i: G.nodes[i].get('label_name', '?') for i in G.nodes()}
-        plt.figure(figsize=(8, 8))
-        pos = nx.spring_layout(G, seed=42, k=0.5)
+    plt.figure(figsize=(8, 8))
+    pos = nx.spring_layout(G, seed=42, k=0.5)
 
-        nx.draw_networkx_nodes(G, pos, node_size=400, node_color='#ADD8E6', edgecolors='black')
-        nx.draw_networkx_edges(G, pos, edge_color='gray', width=1.5, alpha=0.7)
-        nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=10, font_family='sans-serif')
+    nx.draw_networkx_nodes(G, pos, node_size=400, node_color='#ADD8E6', edgecolors='black')  # 换个颜色区分
+    nx.draw_networkx_edges(G, pos, edge_color='gray', width=1.5, alpha=0.7)
+    nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=10, font_family='sans-serif')
 
-        plt.title(f"Generated Graph (Threshold={threshold})", fontsize=15)
-        plt.axis('off')
-        plt.show()
-        plt.close()
+    plt.title(f"Generated Graph (Threshold={threshold})", fontsize=15)
+    plt.axis('off')
+    plt.show()
 
     return G
