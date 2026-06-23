@@ -5,7 +5,6 @@ Replaces the mutable ``args`` Namespace that was threaded through every module.
 """
 import dataclasses
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 

@@ -5,7 +5,6 @@ All metric functions accept config object for device resolution.
 import torch
 import torch.nn.functional as F
 from torch_geometric.utils import to_dense_adj
-from torch_geometric.data import Batch
 
 from utils.graph_utils import extract_explanatory_subgraph
 

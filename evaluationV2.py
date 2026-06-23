@@ -6,8 +6,6 @@ that obtain the desired labels when evaluated by a pre-trained GNN model.
 """
 
 import torch
-from torch_geometric.utils import to_dense_adj
-from torch_geometric.data import Batch
 from tqdm import tqdm
 
 from utils.batch_utils import output_to_batch
@@ -113,7 +111,6 @@ def count_valid(target_lables, cf_graphs, gnn):
     gnn.eval()
 
     pred_logits_cf = gnn.get_pred(cf_graphs.x, cf_graphs.edge_index, cf_graphs.batch)[0]
-    print(pred_logits_cf)
     pred_labels_cf = pred_logits_cf.argmax(dim=1).view(-1,1)
 
     flipped_lables = (pred_labels_cf == target_lables).sum().item()

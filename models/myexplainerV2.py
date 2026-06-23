@@ -1,22 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch_scatter
-from torch import Tensor
-from torch.nn import Parameter
-from torch_geometric.nn.dense.linear import Linear
-from torch_geometric.nn.dense import dense_diff_pool
-from torch_geometric.nn import DenseGCNConv, GCNConv, GATConv, global_mean_pool, global_max_pool, global_add_pool
-from torch_geometric.nn.inits import glorot, zeros
-
-from torch_geometric.utils import to_dense_adj, to_dense_batch
-
-from typing import Optional
-
-from utils.graph_utils import process_outputs
-
-
-
+from torch_geometric.nn import GCNConv
 
 
 class DeleteNet(nn.Module):
@@ -331,71 +316,3 @@ class MyExplainerV2(nn.Module):
         margin_loss = F.relu(cfg.cf_margin + logits_o - logits_t).mean()
 
         return ce_loss + cfg.lambda_cf_margin * margin_loss
-
-
-
-
-
-
-class FrequentSubgraphMiner(nn.Module):
-    def __init__(self, node_emb_dim):
-        super(FrequentSubgraphMiner, self).__init__()
-        self.node_emb_dim = node_emb_dim
-        self.mlp_mask = nn.Sequential(
-            nn.Linear(self.node_emb_dim, self.node_emb_dim * 2),
-            nn.ReLU(),
-            nn.Linear(self.node_emb_dim * 2, 1)
-        )
-
-    def forward(self, x):
-        return self.mlp_mask(x)
-
-
-
-class DenseGATConv(nn.Module):
-    def __init__(self, in_channels, out_channels, edge_attr_dim, aggr='add', bias=True):
-        super(DenseGATConv, self).__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.edge_attr_dim = edge_attr_dim
-        self.aggr = aggr
-        # Linear transformations for node features
-        self.lin_rel = nn.Linear(in_channels, out_channels, bias=bias)
-        self.lin_root = nn.Linear(in_channels, out_channels, bias=False)
-
-        # Additional transformation for edge attributes
-        self.lin_edge = nn.Linear(edge_attr_dim, 1, bias=False)
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        self.lin_rel.reset_parameters()
-        self.lin_root.reset_parameters()
-        self.lin_edge.reset_parameters()
-
-    def forward(self, x, adj, edge_attr, mask=None):
-        B, N, _ = x.size()
-        # Expand edge attributes to match the adjacency matrix
-        full_edge_attr = torch.zeros(B, N, N, self.edge_attr_dim, device=edge_attr.device)
-        tril_indices = torch.tril_indices(N, N, offset=-1)
-        full_edge_attr[:, tril_indices[0], tril_indices[1]] = edge_attr
-        full_edge_attr[:, tril_indices[1], tril_indices[0]] = edge_attr
-        # Transform edge attributes
-        edge_attr_transformed = self.lin_edge(full_edge_attr).squeeze(-1)  # Shape: [B, N, N]
-
-        # Modify adjacency matrix with edge attributes
-        edge_adj = adj * edge_attr_transformed  # Shape: [B, N, N]
-
-        # Perform graph convolution
-        out = torch.matmul(edge_adj, x)  # Shape: [B, N, out_channels]
-        if self.aggr == 'mean':
-            out = out / edge_adj.sum(dim=-1, keepdim=True).clamp_(min=1)
-        out = self.lin_rel(out)
-        out += self.lin_root(x)
-        if mask is not None:
-            out = out * mask.view(B, N, 1).to(x.dtype)
-        return out
-
-    def __repr__(self):
-        return (f'{self.__class__.__name__}({self.in_channels}, '
-                f'{self.out_channels}, edge_attr_dim={self.edge_attr_dim})')
