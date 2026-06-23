@@ -2,7 +2,9 @@
 
 Base commit: 411b935
 
-- Task 1: pending (Excise Dead Code)
+- Task 1: complete (commits 411b935..1034586, review clean with 2 Minor findings noted)
+  Minor: evaluationV2.py has 7 unused imports left over from deleted code
+  Minor: clear.py has residual `# Active implementation starts here.` comment
 - Task 2: pending (Create ExplainerConfig)
 - Task 3: pending (Unify GNN Interface)
 - Task 4: pending (Consolidate Evaluation Metrics)

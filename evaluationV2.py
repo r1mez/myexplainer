@@ -21,24 +21,23 @@ import torch.nn.functional as F
 from utils.vis_utils import visualize_explainer_graph
 
 
-def evaluate(args, model, gnn, data_loader):
+def evaluate(config, model, gnn, data_loader):
     model.eval()
     gnn.eval()
-    args.train_mode = False
 
 
     y_desired_all = []
     ori_prob_all = []
     with torch.no_grad():
         for batch in data_loader:
-            origraphs = batch['graphs'].to(args.device)
+            origraphs = batch['graphs'].to(config.device)
             _, ori_pred_logits = gnn.get_pred(origraphs.x, origraphs.edge_index, origraphs.batch)
             ori_prob = F.softmax(ori_pred_logits, dim=1)
             ori_pred = ori_pred_logits.argmax(dim=1)
             y_desired = (1 - ori_pred).float().unsqueeze(1)
             y_desired_all.append(y_desired.cpu())
             ori_prob_all.append(ori_prob.cpu())
-    device = args.device
+    device = config.device
 
 
 
@@ -53,7 +52,7 @@ def evaluate(args, model, gnn, data_loader):
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(data_loader, desc="Evaluating:")):
-            origraphs = batch['graphs'].to(args.device)
+            origraphs = batch['graphs'].to(config.device)
             subgraphs = batch['subgraphs']
 
             x = origraphs.x
@@ -61,7 +60,7 @@ def evaluate(args, model, gnn, data_loader):
             batch_vec = origraphs.batch
 
             # ✅ 使用预计算的y_desired，确保每个epoch一致
-            y_desired = y_desired_all[batch_idx].to(args.device)
+            y_desired = y_desired_all[batch_idx].to(config.device)
             y_hat = (1 - y_desired).float()  # 原始预测 = 1 - 反事实标签
 
 
@@ -89,9 +88,9 @@ def evaluate(args, model, gnn, data_loader):
                     print(f"            sparsity = 1 - ({exp_edges}/{ori_edges}) = {1 - exp_edges/ori_edges:.4f}")
 
             valid_cf += count_valid(y_desired, cf_graphs, gnn)
-            proximity += compute_proximity(args, cf_graphs, origraphs)
-            fidel_sum += compute_fidelity_prob(args, origraphs, cf_graphs, ori_prob_all[batch_idx], gnn)
-            sparsity_sum += compute_sparsity(args, origraphs, cf_graphs)
+            proximity += compute_proximity(config, cf_graphs, origraphs)
+            fidel_sum += compute_fidelity_prob(config, origraphs, cf_graphs, ori_prob_all[batch_idx], gnn)
+            sparsity_sum += compute_sparsity(config, origraphs, cf_graphs)
 
 
             num_batches += 1
@@ -102,9 +101,6 @@ def evaluate(args, model, gnn, data_loader):
     fidelity = fidel_sum / total if total > 0 else 0.0
 
 
-
-
-    args.train_mode = True
 
     return {
         "validity": validity,
@@ -127,7 +123,7 @@ def count_valid(target_lables, cf_graphs, gnn):
 
     return flipped_lables
 
-def compute_proximity(args, cf_graphs, ori_graphs):
+def compute_proximity(config, cf_graphs, ori_graphs):
     """
     计算原始图与反事实图的邻接矩阵距离 (L1 Norm / Graph Edit Distance Approximation)
     修复了维度对齐问题，并解决了 Frobenius 范数导致的量纲不匹配问题。
@@ -137,7 +133,7 @@ def compute_proximity(args, cf_graphs, ori_graphs):
     ori_graphs = ori_graphs.to_data_list()
     cf_graphs = cf_graphs.to_data_list()
     batch_size = len(ori_graphs)
-    distances = torch.zeros(batch_size, device=args.device)
+    distances = torch.zeros(batch_size, device=config.device)
 
     for i in range(batch_size):
         orig_data = ori_graphs[i]
@@ -188,7 +184,7 @@ def compute_proximity(args, cf_graphs, ori_graphs):
 
     return distances.sum().item()
 
-def compute_fidelity_prob(args, ori_graphs, cf_graphs, ori_prob, gnn):
+def compute_fidelity_prob(config, ori_graphs, cf_graphs, ori_prob, gnn):
     """
     计算将原始图替换为反事实图后，原始预测类别的概率下降值（保真度）。
 
@@ -219,7 +215,7 @@ def compute_fidelity_prob(args, ori_graphs, cf_graphs, ori_prob, gnn):
 
     return fidelity_sum
 
-def compute_sparsity(args, ori_graphs, cf_graphs):
+def compute_sparsity(config, ori_graphs, cf_graphs):
     ori_graphs, cf_graphs = ori_graphs.to_data_list(), cf_graphs.to_data_list()
     exp_graphs = [extract_explanatory_subgraph(ori, cf) for ori, cf in zip(ori_graphs, cf_graphs)]
 

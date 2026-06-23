@@ -73,19 +73,19 @@ class AddVGAENet(nn.Module):
 
 
 class MyExplainerV2(nn.Module):
-    def __init__(self, args, gnn):
+    def __init__(self, config, gnn):
         super().__init__()
-        self.args = args
+        self.config = config
         self.gnn = gnn
-        self.device = args.device
+        self.device = config.device
 
         # 1. Graph Encoder
-        self.conv1 = GCNConv(args.x_dim, args.h_dim)
-        self.conv2 = GCNConv(args.h_dim, args.h_dim)
+        self.conv1 = GCNConv(config.x_dim, config.h_dim)
+        self.conv2 = GCNConv(config.h_dim, config.h_dim)
 
         # 2. Functional Modules
-        self.delete_net = DeleteNet(args.h_dim)
-        self.add_net = AddVGAENet(args.h_dim, args.z_dim)
+        self.delete_net = DeleteNet(config.h_dim)
+        self.add_net = AddVGAENet(config.h_dim, config.z_dim)
 
     # ================= 核心逻辑：Pipeline =================
 
@@ -283,7 +283,7 @@ class MyExplainerV2(nn.Module):
 
     # ================= Loss 计算 =================
 
-    def compute_loss(self, args, graphs, y_desired, outputs):
+    def compute_loss(self, graphs, y_desired, outputs):
         # 提取变量，使公式更干净
         cf_probs, cf_logits = self.gnn.get_pred_explain(
             graphs.x, outputs["edge_index_cf"], outputs["edge_weight_cf"], graphs.batch
@@ -291,7 +291,7 @@ class MyExplainerV2(nn.Module):
 
         # 1. CF Prediction Loss (Classification + Margin)
         y_target = y_desired.to(self.device).view(-1).long()
-        cf_loss = self._compute_cf_loss(cf_logits, y_target, args)
+        cf_loss = self._compute_cf_loss(cf_logits, y_target)
 
         # 2. Regularization (L1 Sparsity)
         l1_add = outputs["p_add"].mean() if outputs["p_add"] is not None else 0.0
@@ -301,16 +301,14 @@ class MyExplainerV2(nn.Module):
         recon_loss = outputs["add_recon_loss"]
         kl_loss = outputs["add_kl_loss"]
 
-        # 总损失聚合
+        cfg = self.config
         total_loss = (
-                getattr(args, "w_cf", 5.0) * cf_loss +
-                getattr(args, "w_l1_add", 0.1) * l1_add +
-                getattr(args, "w_l1_del", 1.0) * l1_del +
-                getattr(args, "w_vgae_recon", 5.0) * recon_loss +
-                getattr(args, "w_vgae_kl", 1.0) * kl_loss
+                cfg.w_cf * cf_loss +
+                cfg.w_l1_add * l1_add +
+                cfg.w_l1_del * l1_del +
+                cfg.w_vgae_recon * recon_loss +
+                cfg.w_vgae_kl * kl_loss
         )
-
-        # 4. (Optional) Budget Loss - 如有需要可在此处恢复
 
         return {
             "total": total_loss,
@@ -319,7 +317,7 @@ class MyExplainerV2(nn.Module):
             "kl": kl_loss.detach(),
         }
 
-    def _compute_cf_loss(self, logits, y_target, args):
+    def _compute_cf_loss(self, logits, y_target):
         """计算 CrossEntropy 和 Margin Loss"""
         ce_loss = F.cross_entropy(logits, y_target)
 
@@ -329,11 +327,10 @@ class MyExplainerV2(nn.Module):
         logits_t = logits[idx, y_target]
         logits_o = logits[idx, 1 - y_target]  # 假设是二分类，多分类需修改取最大非target逻辑
 
-        margin = getattr(args, "cf_margin", 0.5)
-        margin_loss = F.relu(margin + logits_o - logits_t).mean()
+        cfg = self.config
+        margin_loss = F.relu(cfg.cf_margin + logits_o - logits_t).mean()
 
-        lambda_margin = getattr(args, "lambda_cf_margin", 1.0)
-        return ce_loss + lambda_margin * margin_loss
+        return ce_loss + cfg.lambda_cf_margin * margin_loss
 
 
 

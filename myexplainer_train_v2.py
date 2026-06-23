@@ -7,6 +7,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader as TorchDataLoader
 from torch_geometric.loader import DataLoader
 
+from config import ExplainerConfig
 from evaluationV2 import evaluate
 from models.myexplainerV2 import MyExplainerV2
 from utils import get_datasets, train_collate_fn
@@ -63,15 +64,16 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # 设置设备为torch.device对象
-    args.device = torch.device(f'cuda:{args.cuda}' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {args.device}")
+    # Build immutable config from CLI args + YAML hparams
+    config = ExplainerConfig.from_args(args)
+    print(f"Using device: {config.device}")
 
     # 加载数据集
     print("\n1. Loading datasets...")
-    train_dataset, val_dataset, test_dataset = get_datasets(name=args.dataset.lower())
-    args.x_dim = train_dataset[0].x.shape[1]
-    args.edge_attr_dim = train_dataset[0].edge_attr.shape[1] if train_dataset[0].edge_attr is not None else 0
+    train_dataset, val_dataset, test_dataset = get_datasets(name=config.dataset.lower())
+    x_dim = train_dataset[0].x.shape[1]
+    edge_attr_dim = train_dataset[0].edge_attr.shape[1] if train_dataset[0].edge_attr is not None else 0
+    config = config.with_dataset_dims(x_dim, edge_attr_dim)
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
 
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=False)
@@ -80,7 +82,7 @@ def main():
 
     # 加载被解释GNN
     print("\n2. Loading pre-trained GNN classifier...")
-    gnn = torch.load(f'param/gnns/{args.dataset.lower()}_gcn.pt', map_location=args.device)
+    gnn = torch.load(f'param/gnns/{config.dataset.lower()}_gcn.pt', map_location=config.device)
     for p in gnn.parameters():
         p.requires_grad_(False)
     gnn.eval()
@@ -91,7 +93,7 @@ def main():
     pred_probs = []
     with torch.no_grad():
         for data in train_dataset:
-            data = data.to(args.device)
+            data = data.to(config.device)
             out = gnn(data.x, data.edge_index, data.batch)
             pred_probs.extend(out.softmax(dim=1))
             preds = out.argmax(dim=1).cpu()
@@ -106,50 +108,50 @@ def main():
 
     # 加载子图模式
     # 如果fsm_results/args.dataset_patterns.pkl不存在，则运行FSMiner进行挖掘,否则直接加载
-    patterns = subgraph_mining(args,splited_train_dataset)
+    patterns = subgraph_mining(config, splited_train_dataset)
 
 
 
     print("\n4. Creating dataset with subgraph masks...")
 
-    train_dataset_with_masks = MappedDataset(args, train_dataset, patterns, pred_labels, pred_probs)
-    test_dataset_with_masks = MappedDataset(args, test_dataset, patterns,gnn=gnn)
-    val_dataset_with_masks = MappedDataset(args, val_dataset, patterns,gnn=gnn)
+    train_dataset_with_masks = MappedDataset(config, train_dataset, patterns, pred_labels, pred_probs)
+    test_dataset_with_masks = MappedDataset(config, test_dataset, patterns, gnn=gnn)
+    val_dataset_with_masks = MappedDataset(config, val_dataset, patterns, gnn=gnn)
 
     print("\n5. Creating masked data loader...")
     train_loader_masked = TorchDataLoader(
         train_dataset_with_masks,
-        batch_size=args.batch_size,
+        batch_size=config.batch_size,
         shuffle=False,
         collate_fn=train_collate_fn
     )
     test_loader_masked = TorchDataLoader(
         test_dataset_with_masks,
-        batch_size=args.batch_size,
+        batch_size=config.batch_size,
         shuffle=False,
         collate_fn=train_collate_fn
     )
     val_loader_masked = TorchDataLoader(
         val_dataset_with_masks,
-        batch_size=args.batch_size,
+        batch_size=config.batch_size,
         shuffle=False,
         collate_fn=train_collate_fn
     )
-    print(f"  Batch size: {args.batch_size}")
+    print(f"  Batch size: {config.batch_size}")
     print(f"  Total batches: {len(train_loader_masked)}")
 
-    if args.train_mode:
+    if config.train_mode:
         # 初始化模型
         print("\n7. Initializing MyExplainer model...")
-        model = MyExplainerV2(args, gnn).to(args.device)
+        model = MyExplainerV2(config, gnn).to(config.device)
         num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"  Model parameters: {num_params:,}")
 
         # 设置优化器
         optimizer = optim.Adam(
             model.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay
+            lr=config.lr,
+            weight_decay=config.weight_decay
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -160,22 +162,22 @@ def main():
             min_lr=1e-6
         )
         print(f"  Optimizer: Adam")
-        print(f"  Learning rate: {args.lr}")
-        print(f"  Weight decay: {args.weight_decay}")
+        print(f"  Learning rate: {config.lr}")
+        print(f"  Weight decay: {config.weight_decay}")
 
         # 训练模型
         print("\n8. Training MyExplainer with subgraph masks...")
         print("=" * 80)
 
         trained_model, losses = train_myexplainerV2(
-            args=args,
+            config=config,
             model=model,
             gnn=gnn,
             train_loader=train_loader_masked,
             eval_loader=val_loader_masked,
             optimizer=optimizer,
             scheduler=scheduler,
-            epochs=args.epochs
+            epochs=config.epochs
         )
         print("\n" + "=" * 80)
         print("Training completed successfully!")
@@ -183,8 +185,8 @@ def main():
     else:
         print("\n8. Loading Trained MyExplainer...")
         print("=" * 80)
-        trained_model = MyExplainerV2(args, gnn).to(args.device)
-        trained_model.load_state_dict(torch.load(f'param/myexplainer_{args.dataset.lower()}_best.pt', map_location=args.device))
+        trained_model = MyExplainerV2(config, gnn).to(config.device)
+        trained_model.load_state_dict(torch.load(f'param/myexplainer_{config.dataset.lower()}_best.pt', map_location=config.device))
         trained_model.eval()
         for p in trained_model.parameters():
             p.requires_grad_(False)
@@ -199,7 +201,7 @@ def main():
     print("=" * 80)
 
     evaluation_metrics = evaluate(
-        args=args,
+        config=config,
         model=trained_model,
         gnn=gnn,
         data_loader=val_loader_masked,

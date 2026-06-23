@@ -19,29 +19,29 @@ from tqdm import tqdm
 import igraph as ig
 
 class MappedDataset(Dataset):
-    def __init__(self, args, dataset, patterns, pred_labels = None, pred_probs = None, gnn = None):
+    def __init__(self, config, dataset, patterns, pred_labels=None, pred_probs=None, gnn=None):
         """
         初始化GraphTrainData数据集
 
         Args:
-            args: 参数
-            dataloader: 训练集PyG的DataLoader，用于加载图数据
+            config: ExplainerConfig 实例
+            dataset: 训练集PyG的DataLoader，用于加载图数据
             pred_labels: 预训练GNN的分类结果
             patterns: 频繁子图的字典（{0：patterns_0, 1: patterns_1}）
         """
         self.patterns_0 = patterns[0]
         self.patterns_1 = patterns[1]
-        self.device = args.device
+        self.device = config.device
         self.graphs = []  # 存储所有单个图
         self.subgraphs = []  # 存储所有图的频繁子图
         self.labels = pred_labels  # 存储GNN预测的标签
         self.probs = pred_probs  # 存储GNN预测的概率
         self.sub_masks = []  # 预计算的频繁子图掩码
-        self.dataset_name = args.dataset
-        self.thresh = args.threshold
-        self.args = args
+        self.dataset_name = config.dataset
+        self.thresh = config.threshold
+        self.config = config
         if self.labels is None and self.probs is None:
-            self._predict_label(args, dataset, gnn)
+            self._predict_label(config, dataset, gnn)
         # 预处理：从dataloader中提取所有图并进行预测
         print("  Processing graphs and computing subgraph masks...")
         self._process_graphs(dataset)
@@ -87,7 +87,7 @@ class MappedDataset(Dataset):
             new_graph = graph.clone()
             if current_num_nodes < num_nodes:
                 padding_size = num_nodes - current_num_nodes
-                feature_dim = self.args.x_dim
+                feature_dim = self.config.x_dim
                 zero_features = torch.zeros(padding_size, feature_dim, dtype=graph.x.dtype, device=graph.x.device)
                 new_x = torch.cat([graph.x, zero_features], dim=0)
                 new_graph.x = new_x
@@ -145,14 +145,14 @@ class MappedDataset(Dataset):
         subgraph = graph_nx.subgraph(matched_nodes).copy()
         return subgraph
 
-    def _predict_label(self, args, dataset, model):
+    def _predict_label(self, config, dataset, model):
         """使用预训练GNN模型预测图的标签和概率"""
         self.labels = []
         self.probs = []
         model = model.eval()
         with torch.no_grad():
             for data in dataset:
-                data = data.to(args.device)
+                data = data.to(config.device)
                 out = model(data.x, data.edge_index, data.batch)
                 self.probs.extend(out.softmax(dim=1))
                 preds = out.argmax(dim=1).cpu()

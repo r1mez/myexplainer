@@ -8,11 +8,11 @@ import torch
 from torch.distributions import Categorical
 
 
-def subgraph_mining(args,datasets):
-    if args.subgraph_method == 'genGraphEx':
+def subgraph_mining(config, datasets):
+    if config.subgraph_method == 'genGraphEx':
         patterns_0 = []
         patterns_1 = []
-        if args.dataset == 'ba2motif':
+        if config.dataset == 'ba2motif':
             Bdist, mean_estimate, result, Adj = GraphRepModel(datasets[0],25)
             for i in range(50):
                 patterns_0.append(graphsampler(25,Bdist, mean_estimate, result, Adj))
@@ -21,14 +21,14 @@ def subgraph_mining(args,datasets):
             for i in range(50):
                 patterns_1.append(graphsampler(25,Bdist, mean_estimate, result, Adj))
         # mutag 417, nci1 111
-        if args.dataset == 'mutag' or args.dataset == 'nci1':
+        if config.dataset == 'mutag' or config.dataset == 'nci1':
             X, Adj = GraphRepModelDiscrete(datasets[0],417)
             for i in range(100):
                 patterns_0.append(graphsamplerDiscrete(417,X, Adj))
             X, Adj = GraphRepModelDiscrete(datasets[1],417)
             for i in range(100):
                 patterns_1.append(graphsamplerDiscrete(417,X, Adj))
-        if args.dataset == 'nci1':
+        if config.dataset == 'nci1':
             X, Adj = GraphRepModelDiscrete(datasets[0],111)
             for i in range(100):
                 patterns_0.append(graphsamplerDiscrete(111,X, Adj))
