@@ -16,6 +16,10 @@ Base commit: 411b935
   Minor: redundant conditional in compute_proximity_from_edge_index
   Minor: local import shadowing module-level Batch import
   Minor: unused fidelity/sparsity imports in baseline_eval_metrics.py
-- Task 5: pending (Dataset Registry)
-- Task 6: pending (Clean Up Subgraph Mining)
+- Task 5: complete (commits 61ab310..10ca617, review clean with findings noted)
+  Important: behavioral change - 6 datasets now generate patterns instead of empty lists (improvement, not bug)
+  Minor: case_study/tsne_indistribution_vis.py still hardcoded (out of scope)
+  Minor: baseline models still hardcode GNN paths (out of scope)
+- Task 6: complete (commits 10ca617..dfdaecd, review clean with 1 Minor noted)
+  Minor: missing trailing newline in subgraph_method.py
 - Task 7: pending (Extract Baseline Runner — optional)
