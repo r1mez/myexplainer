@@ -5,17 +5,13 @@ responsible for measuring the proportion of generated counterfactual graphs
 that obtain the desired labels when evaluated by a pre-trained GNN model.
 """
 
-from typing import Dict, Tuple
-
-import numpy as np
 import torch
-from scipy.sparse import coo_matrix
-from torch_geometric.utils import to_dense_adj, to_dense_batch
-from torch_geometric.data import Batch, Data
+from torch_geometric.utils import to_dense_adj
+from torch_geometric.data import Batch
 from tqdm import tqdm
 
-from utils.batch_utils import core_data_from_batch, output_to_batch
-from utils.graph_utils import extract_explanatory_subgraph, exclude_explanatory_subgraph
+from utils.batch_utils import output_to_batch
+from utils.graph_utils import extract_explanatory_subgraph
 from eval.metrics import proximity as compute_proximity, fidelity as compute_fidelity_prob, sparsity as compute_sparsity
 import torch.nn.functional as F
 

@@ -22,4 +22,6 @@ Base commit: 411b935
   Minor: baseline models still hardcode GNN paths (out of scope)
 - Task 6: complete (commits 10ca617..dfdaecd, review clean with 1 Minor noted)
   Minor: missing trailing newline in subgraph_method.py
-- Task 7: pending (Extract Baseline Runner — optional)
+- Task 7: complete (commits dfdaecd..2771ad4, review found Critical fixed)
+  Critical: cf_graphs not converted to Batch -> fixed with isinstance check
+  Important: type mismatch y_desired float vs long -> fixed

@@ -78,8 +78,6 @@ def train_myexplainerV2(config, model, gnn, train_loader, eval_loader, optimizer
 
 
 
-            # loss_dict = model.compute_loss(args, origraphs, subgraphs, gnn, y_desired, outputs)
-
 
             loss = loss_dict["total"]
 
