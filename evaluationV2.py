@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 from utils.batch_utils import core_data_from_batch, output_to_batch
 from utils.graph_utils import extract_explanatory_subgraph, exclude_explanatory_subgraph
+from eval.metrics import proximity as compute_proximity, fidelity as compute_fidelity_prob, sparsity as compute_sparsity
 import torch.nn.functional as F
 
 from utils.vis_utils import visualize_explainer_graph
@@ -123,107 +124,3 @@ def count_valid(target_lables, cf_graphs, gnn):
 
     return flipped_lables
 
-def compute_proximity(config, cf_graphs, ori_graphs):
-    """
-    计算原始图与反事实图的邻接矩阵距离 (L1 Norm / Graph Edit Distance Approximation)
-    修复了维度对齐问题，并解决了 Frobenius 范数导致的量纲不匹配问题。
-    """
-    rho = 1.0
-
-    ori_graphs = ori_graphs.to_data_list()
-    cf_graphs = cf_graphs.to_data_list()
-    batch_size = len(ori_graphs)
-    distances = torch.zeros(batch_size, device=config.device)
-
-    for i in range(batch_size):
-        orig_data = ori_graphs[i]
-        cf_data = cf_graphs[i]
-
-        # ---------------------------------------------------------
-        # 步骤 1: 确定统一的节点数 N
-        # 即使 cf_data 删除了边导致孤立点，矩阵维度仍需保持与原图一致
-        # ---------------------------------------------------------
-        if getattr(orig_data, 'num_nodes', None) is not None:
-            N = orig_data.num_nodes
-        elif getattr(orig_data, 'x', None) is not None:
-            N = orig_data.x.size(0)
-        else:
-            # 兜底逻辑：取最大的索引值
-            max_idx = 0
-            if orig_data.edge_index.numel() > 0:
-                max_idx = int(orig_data.edge_index.max())
-            if cf_data.edge_index.numel() > 0:
-                max_idx = max(max_idx, int(cf_data.edge_index.max()))
-            N = max_idx + 1
-
-        # ---------------------------------------------------------
-        # 步骤 2: 转换为稠密矩阵 (强制指定 max_num_nodes=N)
-        # 这确保了 orig_adj 和 cf_adj 形状严格一致 [N, N]
-        # ---------------------------------------------------------
-        orig_adj = to_dense_adj(orig_data.edge_index, max_num_nodes=N).squeeze(0)
-        cf_adj = to_dense_adj(cf_data.edge_index, max_num_nodes=N).squeeze(0)
-
-        # ---------------------------------------------------------
-        # 步骤 3: 计算差异 (使用 L1 范数)
-        # p=1 代表绝对值之和。对于无向图，删 1 条边，这里的值是 2。
-        # ---------------------------------------------------------
-        d_adj_entries = torch.norm(orig_adj - cf_adj, p=1)
-
-        # ---------------------------------------------------------
-        # 步骤 4: 归一化
-        # 分子是矩阵条目的变化量，分母也应是矩阵条目的最大容量 (2 * max_edges)
-        # ---------------------------------------------------------
-        m_orig = orig_data.num_edges // 2 if orig_data.is_undirected() else orig_data.num_edges
-        m_cf = cf_data.num_edges // 2 if cf_data.is_undirected() else cf_data.num_edges
-        max_m = max(m_orig, m_cf)
-
-        # 乘以 2.0 是为了匹配无向图邻接矩阵的对称性 (每条边占 2 个坑位)
-        normalization = 2.0 * max_m if max_m > 0 else 1.0
-
-        distances[i] = rho * (d_adj_entries / normalization)
-
-    return distances.sum().item()
-
-def compute_fidelity_prob(config, ori_graphs, cf_graphs, ori_prob, gnn):
-    """
-    计算将原始图替换为反事实图后，原始预测类别的概率下降值（保真度）。
-
-    Args:
-        args: 包含 device 等配置的参数对象
-        ori_graphs: 原始图 Batch 对象
-        cf_graphs: 反事实图 Batch 对象（已修改的图）
-        ori_prob: 原始图的预测概率 [N, num_classes]
-        gnn: 图神经网络模型，需支持 get_pred(x, edge_index, batch)
-
-    Returns:
-        fidelity_sum: 所有样本上原始类别概率的下降总和
-    """
-    # 获取原始预测类别（每个图最可能的类别）
-    ori_pred = ori_prob.argmax(dim=1)  # shape: [N]
-
-    # 在反事实图上进行预测
-    cf_pred_logits = gnn.get_pred(
-        cf_graphs.x, cf_graphs.edge_index, cf_graphs.batch
-    )[0]  # 假设返回 (logits, ...)
-    cf_prob = F.softmax(cf_pred_logits, dim=1)  # shape: [N, num_classes]
-
-    fidelity_sum = 0.0
-    for i in range(len(ori_pred)):
-        ori_prob_single = ori_prob[i, ori_pred[i]].item()  # 原图对原始预测类的概率
-        cf_prob_single = cf_prob[i, ori_pred[i]].item()  # 反事实图对同一类的概率
-        fidelity_sum += (ori_prob_single - cf_prob_single)  # 下降量（越大说明解释越有效）
-
-    return fidelity_sum
-
-def compute_sparsity(config, ori_graphs, cf_graphs):
-    ori_graphs, cf_graphs = ori_graphs.to_data_list(), cf_graphs.to_data_list()
-    exp_graphs = [extract_explanatory_subgraph(ori, cf) for ori, cf in zip(ori_graphs, cf_graphs)]
-
-    exp_num_edges = [exp.num_edges for exp in exp_graphs]
-    ori_num_edges = [ori.num_edges for ori in ori_graphs]
-
-    sparsity = 0.0
-    for ori_e, exp_e in zip(ori_num_edges, exp_num_edges):
-        sparsity += 1 - (exp_e / ori_e)
-
-    return sparsity

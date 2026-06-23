@@ -1,7 +1,5 @@
-import time
 import torch
-import torch.nn.functional as F
-from torch_geometric.utils import to_dense_adj
+from eval.metrics import proximity, fidelity, sparsity
 
 
 class OracleWrappedModel(torch.nn.Module):
@@ -33,6 +31,10 @@ class OracleWrappedModel(torch.nn.Module):
         return getattr(self.model, name)
 
 
+# Backward-compatible aliases for baseline code that uses the old raw-tensor API.
+# These wrap the consolidated eval.metrics functions for single-graph usage.
+
+
 def compute_proximity_from_edge_index(
     ori_edge_index: torch.Tensor,
     cf_edge_index: torch.Tensor,
@@ -40,36 +42,30 @@ def compute_proximity_from_edge_index(
     device: torch.device,
 ) -> float:
     """
-    按照 MyExplainer 的定义计算单个图的 Proximity。
-    使用 L1 范数并按 2 * max_m 归一化，等价于 evaluationV2.compute_proximity
-    中对每个图的处理逻辑。
+    Single-graph proximity from raw edge_index tensors.
+    Delegates to eval.metrics.proximity via a temporary Data wrapper.
     """
-    ori_edge_index = ori_edge_index.to(device)
-    cf_edge_index = cf_edge_index.to(device)
+    from torch_geometric.data import Batch, Data
 
-    # 检查 ori_edge_index 是否为空
-    if ori_edge_index.numel() == 0:
-        ori_adj = torch.zeros((num_nodes, num_nodes), device=device)
+    ori_data = Data(edge_index=ori_edge_index.to(device), num_nodes=num_nodes)
+    cf_data = Data(edge_index=cf_edge_index.to(device), num_nodes=num_nodes)
+    # is_undirected check requires the graph to have edges; add x for safety
+    if ori_edge_index.numel() > 0:
+        ori_data.x = torch.zeros(num_nodes, 1, device=device)
     else:
-        ori_adj = to_dense_adj(ori_edge_index, max_num_nodes=num_nodes).squeeze(0)
-
-    # 检查 cf_edge_index 是否为空
-    if cf_edge_index.numel() == 0:
-        cf_adj = torch.zeros((num_nodes, num_nodes), device=device)
+        ori_data.x = torch.zeros(num_nodes, 1, device=device)
+    if cf_edge_index.numel() > 0:
+        cf_data.x = torch.zeros(num_nodes, 1, device=device)
     else:
-        cf_adj = to_dense_adj(cf_edge_index, max_num_nodes=num_nodes).squeeze(0)
+        cf_data.x = torch.zeros(num_nodes, 1, device=device)
 
-    # L1 范数，统计矩阵条目的变化量
-    d_adj_entries = torch.norm(ori_adj - cf_adj, p=1)
+    class _Config:
+        def __init__(self, d):
+            self.device = d
 
-    # 归一化：2 * max_m，其中 max_m 是无向图边数（或有向图边数）
-    # 注意：如果 edge_index 是 [2, 0]，size(1) 为 0，不会报错
-    m_ori = ori_edge_index.size(1) // 2
-    m_cf = cf_edge_index.size(1) // 2
-    max_m = max(m_ori, m_cf)
-    normalization = 2.0 * max_m if max_m > 0 else 1.0
-
-    return (d_adj_entries / normalization).item()
+    ori_batch = Batch.from_data_list([ori_data])
+    cf_batch = Batch.from_data_list([cf_data])
+    return proximity(_Config(device), cf_batch, ori_batch)
 
 
 def compute_fidelity_prob_from_probs(
@@ -77,11 +73,9 @@ def compute_fidelity_prob_from_probs(
     cf_probs: torch.Tensor,
 ) -> float:
     """
-    按照 MyExplainer 的定义计算单个图的 Fidelity（概率版）。
-    等价于 evaluationV2.compute_fidelity_prob 中：
-    ori_prob[ori_pred] - cf_prob[ori_pred]。
+    Single-graph fidelity from pre-computed probability tensors.
+    Computes ori_prob[ori_pred] - cf_prob[ori_pred].
     """
-    # 输入假定是一维 [num_classes]
     if ori_probs.dim() > 1:
         ori_probs = ori_probs.squeeze(0)
     if cf_probs.dim() > 1:
@@ -96,11 +90,8 @@ def compute_sparsity_from_edge_index(
     cf_edge_index: torch.Tensor,
 ) -> float:
     """
-    按照 MyExplainer 的稀疏性含义计算单个图的 Sparsity。
-    evaluationV2 通过 extract_explanatory_subgraph 得到解释子图，
-    其边数本质上等价于原图与 CF 图边集的对称差大小。
-    这里直接用边集对称差来近似：
-        sparsity = 1 - (#changed_edges / #ori_edges)
+    Single-graph sparsity from raw edge_index tensors.
+    Uses edge-set symmetric difference as proxy for explanatory subgraph.
     """
     ori_edge_index = ori_edge_index.cpu()
     cf_edge_index = cf_edge_index.cpu()
@@ -117,4 +108,3 @@ def compute_sparsity_from_edge_index(
 
     diff = ori_set.symmetric_difference(cf_set)
     return 1.0 - len(diff) / max(len(ori_set), 1)
-
