@@ -56,7 +56,7 @@ from utils.subgraph_method import (
 # Custom subgraph mining (same as tsne_subgraph_vis.py, no filtering)
 # ---------------------------------------------------------------------------
 
-def mine_subgraphs(args, datasets, num_samples=1000):
+def mine_subgraphs(args, datasets, num_samples=100):
     dataset_name = args.dataset.lower()
     patterns_0 = []
     patterns_1 = []
@@ -137,8 +137,8 @@ def plot_tsne_4groups(
     config = {
         0: {"label": "Original Class 0",     "color": "#E74C3C", "marker": "o", "alpha": 0.5,  "s": 30, "edgecolors": "none"},
         1: {"label": "Original Class 1",     "color": "#3498DB", "marker": "o", "alpha": 0.5,  "s": 30, "edgecolors": "none"},
-        2: {"label": "Generated CF → Class 0", "color": "#F39C12", "marker": "^", "alpha": 0.9,  "s": 60, "edgecolors": "#E67E22", "linewidths": 1.2},
-        3: {"label": "Generated CF → Class 1", "color": "#2ECC71", "marker": "^", "alpha": 0.9,  "s": 60, "edgecolors": "#27AE60", "linewidths": 1.2},
+        2: {"label": "Generated CF → Class 0", "color": "#F39C12", "marker": "^", "alpha": 1.0,  "s": 60, "edgecolors": "#E67E22", "linewidths": 1.2, "face_alpha": 0.3},
+        3: {"label": "Generated CF → Class 1", "color": "#2ECC71", "marker": "^", "alpha": 1.0,  "s": 60, "edgecolors": "#27AE60", "linewidths": 1.2, "face_alpha": 0.3},
     }
 
     fig, ax = plt.subplots(figsize=(10, 7))
@@ -147,10 +147,8 @@ def plot_tsne_4groups(
         mask = group_labels == gid
         if mask.sum() == 0:
             continue
-        ax.scatter(
-            embeddings_2d[mask, 0],
-            embeddings_2d[mask, 1],
-            c=cfg["color"],
+        face_alpha = cfg.get("face_alpha")
+        scatter_kwargs = dict(
             marker=cfg["marker"],
             label=f'{cfg["label"]} ({mask.sum()})',
             alpha=cfg["alpha"],
@@ -158,6 +156,11 @@ def plot_tsne_4groups(
             edgecolors=cfg["edgecolors"],
             linewidths=cfg.get("linewidths", 0),
         )
+        if face_alpha is not None:
+            scatter_kwargs["facecolors"] = (*matplotlib.colors.to_rgb(cfg["color"]), face_alpha)
+        else:
+            scatter_kwargs["c"] = cfg["color"]
+        ax.scatter(embeddings_2d[mask, 0], embeddings_2d[mask, 1], **scatter_kwargs)
 
     ax.set_xlabel("t-SNE Dimension 1", fontsize=12)
     ax.set_ylabel("t-SNE Dimension 2", fontsize=12)
@@ -211,10 +214,10 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument(
-        "--sample_ratio", type=float, default=0.1,
+        "--sample_ratio", type=float, default=0.05,
         help="Fraction of dataset to generate CF graphs for",
     )
-    parser.add_argument("--num_samples", type=int, default=1000)
+    parser.add_argument("--num_samples", type=int, default=100)
     parser.add_argument(
         "--proto_topk", type=int, default=100,
         help="Top-K pattern families per class for MappedDataset (keeps VF2 fast)",

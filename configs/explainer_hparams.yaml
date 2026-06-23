@@ -1,0 +1,46 @@
+datasets:
+  ba2motif:
+    oracle_del_topk: 6
+    oracle_del_random_negatives: 2
+    oracle_del_probe_graphs_per_batch: 4
+    oracle_del_reward_tie_eps: 1e-6
+  mutag:
+    oracle_del_topk: 6
+    oracle_del_random_negatives: 2
+    oracle_del_probe_graphs_per_batch: 4
+    oracle_del_reward_tie_eps: 1e-6
+  mutag188:
+    oracle_del_topk: 6
+    oracle_del_random_negatives: 2
+    oracle_del_probe_graphs_per_batch: 4
+    oracle_del_reward_tie_eps: 1e-6
+  nci1:
+    oracle_del_topk: 6
+    oracle_del_random_negatives: 2
+    oracle_del_probe_graphs_per_batch: 4
+    oracle_del_reward_tie_eps: 1e-6
+  bbbp:
+    oracle_del_topk: 6
+    oracle_del_random_negatives: 2
+    oracle_del_probe_graphs_per_batch: 4
+    oracle_del_reward_tie_eps: 1e-6
+  benzene:
+    oracle_del_topk: 6
+    oracle_del_random_negatives: 2
+    oracle_del_probe_graphs_per_batch: 4
+    oracle_del_reward_tie_eps: 1e-6
+  alkane_carbonyl:
+    oracle_del_topk: 6
+    oracle_del_random_negatives: 2
+    oracle_del_probe_graphs_per_batch: 4
+    oracle_del_reward_tie_eps: 1e-6
+  fluoride_carbonyl:
+    oracle_del_topk: 6
+    oracle_del_random_negatives: 2
+    oracle_del_probe_graphs_per_batch: 4
+    oracle_del_reward_tie_eps: 1e-6
+  proteins:
+    oracle_del_topk: 6
+    oracle_del_random_negatives: 2
+    oracle_del_probe_graphs_per_batch: 4
+    oracle_del_reward_tie_eps: 1e-6

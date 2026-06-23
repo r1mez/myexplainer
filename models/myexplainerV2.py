@@ -9,7 +9,6 @@ from torch_geometric.nn.dense import dense_diff_pool
 from torch_geometric.nn import DenseGCNConv, GCNConv, GATConv, global_mean_pool, global_max_pool, global_add_pool
 from torch_geometric.nn.inits import glorot, zeros
 
-# from graph_conv import DenseGATConv
 from torch_geometric.utils import to_dense_adj, to_dense_batch
 
 from typing import Optional
