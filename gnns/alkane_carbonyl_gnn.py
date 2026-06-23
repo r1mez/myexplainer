@@ -189,8 +189,9 @@ class AlkaneCarbonylGCN(torch.nn.Module):
         self.readout = self.softmax(pred)
         return self.readout, pred
 
-    def get_pred_explain(self, x, edge_index, edge_mask, batch):
-        x = self._encode_nodes(x, edge_index, edge_weight=edge_mask)
+    def get_pred_explain(self, x, edge_index, edge_weight, batch):
+        """Explain interface: compute predictions with edge weights in [0,1]."""
+        x = self._encode_nodes(x, edge_index, edge_weight=edge_weight)
         graph_x = self._pool_graph(x, batch)
         pred = self.ffn(graph_x)
         self.readout = self.softmax(pred)

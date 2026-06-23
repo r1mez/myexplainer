@@ -147,20 +147,19 @@ class BA2MotifGCN(torch.nn.Module):
         self.readout = probs
         return probs, logits
 
-    def get_pred_explain(self, x, edge_index, edge_mask, batch, mask_is_logit=False):
+    def get_pred_explain(self, x, edge_index, edge_weight, batch):
         """
-        解释用接口：
-          - edge_mask:
-              1) 若为 logits（如 PROXYExplainer 输出），则 mask_is_logit=True，内部走 sigmoid
-              2) 若已在 [0,1]（如 MyExplainerV2 的 adj_recon[row, col]），则 mask_is_logit=False
+        Explain interface: compute predictions with edge weights.
 
-        返回: (softmax 概率, logits)
+        Args:
+            x: Node features [N, F]
+            edge_index: Edge indices [2, E]
+            edge_weight: Edge weights in [0, 1] range [E]
+            batch: Batch vector [N]
+
+        Returns:
+            (probs, logits) tuple
         """
-        if mask_is_logit:
-            edge_weight = (edge_mask * EPS).sigmoid()
-        else:
-            edge_weight = edge_mask
-
         graph_x = self.get_graph_rep(x, edge_index, batch, edge_weight=edge_weight)
         logits  = self.classifier(graph_x)
         probs   = self.softmax(logits)

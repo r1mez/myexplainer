@@ -97,11 +97,10 @@ class BBBP_GCN(torch.nn.Module):
         pred = F.relu(pred)
         return pred
 
-    def get_pred_explain(self, x, edge_index, edge_mask, batch):
-        edge_mask = edge_mask.sigmoid()
-        # edge_weight = edge_mask.unsqueeze(-1).repeat(1, 128)
+    def get_pred_explain(self, x, edge_index, edge_weight, batch):
+        """Explain interface: compute predictions with edge weights in [0,1]."""
         for conv, batch_norm, relu in zip(self.convs, self.batch_norms, self.relus):
-            x = conv(x, edge_index, edge_weight=edge_mask)
+            x = conv(x, edge_index, edge_weight=edge_weight)
             x = relu(x)
         node_x = x
         graph_x = global_mean_pool(node_x, batch)

@@ -117,8 +117,8 @@ class Mutag188_GCN(torch.nn.Module):
         self.readout = probs
         return probs, logits
 
-    def get_pred_explain(self, x, edge_index, edge_mask, batch, mask_is_logit=False):
-        edge_weight = (edge_mask * EPS).sigmoid() if mask_is_logit else edge_mask
+    def get_pred_explain(self, x, edge_index, edge_weight, batch):
+        """Explain interface: compute predictions with edge weights in [0,1]."""
         graph_x = self.get_graph_rep(x, edge_index, batch, edge_weight=edge_weight)
         logits = self.classifier(graph_x)
         probs = self.softmax(logits)

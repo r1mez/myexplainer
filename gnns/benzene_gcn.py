@@ -110,10 +110,10 @@ class Benzene_GCN(torch.nn.Module):
         self.readout = self.softmax(pred)
         return self.readout, pred
 
-    def get_pred_explain(self, x, edge_index, edge_mask, batch):
-        # 在解释模型时，edge_mask 通常作为 edge_weight 传入 GCN
+    def get_pred_explain(self, x, edge_index, edge_weight, batch):
+        """Explain interface: compute predictions with edge weights in [0,1]."""
         for conv, batch_norm, relu in zip(self.convs, self.batch_norms, self.relus):
-            x = conv(x, edge_index, edge_weight=edge_mask)
+            x = conv(x, edge_index, edge_weight=edge_weight)
             x = relu(x)
         node_x = x
         graph_x = global_mean_pool(node_x, batch)
