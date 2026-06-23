@@ -11,6 +11,7 @@ from config import ExplainerConfig
 from evaluationV2 import evaluate
 from models.myexplainerV2 import MyExplainerV2
 from utils import get_datasets, train_collate_fn
+from utils.dataset_registry import get_dataset_entry
 from utils.pair_data import MappedDataset
 from utils.subgraph_method import subgraph_mining
 from utils.train_myexplainer import train_myexplainerV2
@@ -82,7 +83,8 @@ def main():
 
     # 加载被解释GNN
     print("\n2. Loading pre-trained GNN classifier...")
-    gnn = torch.load(f'param/gnns/{config.dataset.lower()}_gcn.pt', map_location=config.device)
+    entry = get_dataset_entry(config.dataset)
+    gnn = torch.load(f'param/gnns/{entry["gnn_file"]}', map_location=config.device)
     for p in gnn.parameters():
         p.requires_grad_(False)
     gnn.eval()

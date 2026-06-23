@@ -11,7 +11,11 @@ Base commit: 411b935
   Minor: evaluationV2.py docstring still references `args` instead of `config`
 - Task 3: complete (commits 6d2e863..fb1ba51, review found 2 Critical callers fixed)
   Critical: c2explainer.py and atex_cf.py had edge_mask= keyword args -> fixed to edge_weight=
-- Task 4: pending (Consolidate Evaluation Metrics)
+- Task 4: complete (commits fb1ba51..61ab310, review clean with findings noted)
+  Important: baseline_eval_metrics.py fidelity/sparsity wrappers re-implement rather than delegate (API difference is genuine constraint, semantically equivalent)
+  Minor: redundant conditional in compute_proximity_from_edge_index
+  Minor: local import shadowing module-level Batch import
+  Minor: unused fidelity/sparsity imports in baseline_eval_metrics.py
 - Task 5: pending (Dataset Registry)
 - Task 6: pending (Clean Up Subgraph Mining)
 - Task 7: pending (Extract Baseline Runner — optional)

@@ -7,35 +7,41 @@ import matplotlib.pyplot as plt
 import torch
 from torch.distributions import Categorical
 
+from utils.dataset_registry import get_dataset_entry
+
 
 def subgraph_mining(config, datasets):
+    entry = get_dataset_entry(config.dataset)
+    sg_config = entry["subgraph"]
+    method = sg_config["method"]
+    N = sg_config["N"]
+    num_samples = sg_config["num_samples"]
+
     if config.subgraph_method == 'genGraphEx':
         patterns_0 = []
         patterns_1 = []
-        if config.dataset == 'ba2motif':
-            Bdist, mean_estimate, result, Adj = GraphRepModel(datasets[0],25)
-            for i in range(50):
-                patterns_0.append(graphsampler(25,Bdist, mean_estimate, result, Adj))
 
-            Bdist, mean_estimate, result, Adj = GraphRepModel(datasets[1],25)
-            for i in range(50):
-                patterns_1.append(graphsampler(25,Bdist, mean_estimate, result, Adj))
-        # mutag 417, nci1 111
-        if config.dataset == 'mutag' or config.dataset == 'nci1':
-            X, Adj = GraphRepModelDiscrete(datasets[0],417)
-            for i in range(100):
-                patterns_0.append(graphsamplerDiscrete(417,X, Adj))
-            X, Adj = GraphRepModelDiscrete(datasets[1],417)
-            for i in range(100):
-                patterns_1.append(graphsamplerDiscrete(417,X, Adj))
-        if config.dataset == 'nci1':
-            X, Adj = GraphRepModelDiscrete(datasets[0],111)
-            for i in range(100):
-                patterns_0.append(graphsamplerDiscrete(111,X, Adj))
-            X, Adj = GraphRepModelDiscrete(datasets[1],111)
-            for i in range(100):
-                patterns_1.append(graphsamplerDiscrete(111,X, Adj))
-        # 对patterns中的所有图按照key1(节点数)和key2(度数)进行排序
+        if method == "continuous":
+            Bdist, mean_estimate, result, Adj = GraphRepModel(datasets[0], N)
+            for i in range(num_samples):
+                patterns_0.append(graphsampler(N, Bdist, mean_estimate, result, Adj))
+
+            Bdist, mean_estimate, result, Adj = GraphRepModel(datasets[1], N)
+            for i in range(num_samples):
+                patterns_1.append(graphsampler(N, Bdist, mean_estimate, result, Adj))
+
+        elif method == "discrete":
+            X, Adj = GraphRepModelDiscrete(datasets[0], N)
+            for i in range(num_samples):
+                patterns_0.append(graphsamplerDiscrete(N, X, Adj))
+
+            X, Adj = GraphRepModelDiscrete(datasets[1], N)
+            for i in range(num_samples):
+                patterns_1.append(graphsamplerDiscrete(N, X, Adj))
+
+        else:
+            raise ValueError(f"Unknown subgraph method: {method}")
+
         sort_key = lambda G: (G.number_of_nodes(), nx.density(G))
         patterns_0.sort(key=sort_key, reverse=True)
         patterns_1.sort(key=sort_key, reverse=True)
