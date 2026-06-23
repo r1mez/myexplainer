@@ -1,5 +1,6 @@
 """Shared evaluation harness for baseline counterfactual explainer models."""
 import torch
+from torch_geometric.data import Batch
 from tqdm import tqdm
 from eval.metrics import proximity, fidelity, sparsity
 
@@ -54,10 +55,17 @@ class BaselineRunner:
                 )
                 ori_prob = torch.softmax(ori_pred_logits, dim=1)
                 ori_pred = ori_pred_logits.argmax(dim=1)
-                y_desired = (1 - ori_pred).float().unsqueeze(1)
+                y_desired = (1 - ori_pred).long().unsqueeze(1)
 
                 # Generate CF graphs
                 cf_graphs = model_forward_fn(self.model, ori_graphs)
+
+                # Ensure cf_graphs is a Batch object
+                if isinstance(cf_graphs, list):
+                    cf_graphs = Batch.from_data_list(cf_graphs)
+                elif not isinstance(cf_graphs, Batch):
+                    # Single Data object, wrap in list and batch
+                    cf_graphs = Batch.from_data_list([cf_graphs])
 
                 # Compute metrics
                 batch_size = ori_graphs.num_graphs if hasattr(ori_graphs, 'num_graphs') else 1
