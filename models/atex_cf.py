@@ -190,7 +190,7 @@ class ATEXCFExplainer(nn.Module):
             # 前向传播验证
             with torch.no_grad():
                 _, logits = self.model.get_pred_explain(
-                    x, temp_edge_index, edge_mask=temp_edge_weight, batch=batch
+                    x, temp_edge_index, edge_weight=temp_edge_weight, batch=batch
                 )
                 if logits.dim() > 1: logits = logits[0]
                 pred = logits.argmax().item()
@@ -238,7 +238,7 @@ class ATEXCFExplainer(nn.Module):
         # --- 4. 确定原始预测与反事实目标 ---
         with torch.no_grad():
             _, orig_logits = self.model.get_pred_explain(
-                x, edge_index, edge_mask=torch.ones(edge_index.size(1), device=device), batch=batch
+                x, edge_index, edge_weight=torch.ones(edge_index.size(1), device=device), batch=batch
             )
             if orig_logits.dim() > 1: orig_logits = orig_logits[0]
             orig_pred = orig_logits.argmax().item()
@@ -332,7 +332,7 @@ class ATEXCFExplainer(nn.Module):
             # ==============================================================
 
             _, logits = self.model.get_pred_explain(
-                x, full_edge_index, edge_mask=full_edge_weight, batch=batch
+                x, full_edge_index, edge_weight=full_edge_weight, batch=batch
             )
             if logits.dim() > 1: logits = logits[0]
             log_probs = F.log_softmax(logits, dim=-1)
@@ -404,7 +404,7 @@ def evaluate_atex_cf_graph(pred_model, dataset, device, epochs=100, lr=0.01, top
         # 1. 原始预测（不计入 runtime 和 oracle_calls）
         with torch.no_grad():
             _, ori_logits = pred_model.get_pred_explain(
-                data.x, data.edge_index, edge_mask=torch.ones(data.edge_index.size(1), device=device), batch=batch
+                data.x, data.edge_index, edge_weight=torch.ones(data.edge_index.size(1), device=device), batch=batch
             )
             if ori_logits.dim() > 1: ori_logits = ori_logits[0]
             ori_probs = F.softmax(ori_logits, dim=-1)
@@ -424,7 +424,7 @@ def evaluate_atex_cf_graph(pred_model, dataset, device, epochs=100, lr=0.01, top
         # 3. 验证 CF（不计入 oracle_calls）
         with torch.no_grad():
             _, cf_logits = pred_model.get_pred_explain(
-                cf_x, cf_edge_index, edge_mask=torch.ones(cf_edge_index.size(1), device=device), batch=batch
+                cf_x, cf_edge_index, edge_weight=torch.ones(cf_edge_index.size(1), device=device), batch=batch
             )
             if cf_logits.dim() > 1: cf_logits = cf_logits[0]
             cf_probs = F.softmax(cf_logits, dim=-1)

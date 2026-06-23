@@ -227,7 +227,7 @@ class C2ExplainerStructuralOnly(nn.Module):
                 _, logits = self.model.get_pred_explain(
                     x,
                     final_edge_index,
-                    edge_mask=final_edge_weight,
+                    edge_weight=final_edge_weight,
                     batch=batch,
                 )
             else:
