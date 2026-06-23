@@ -5,7 +5,6 @@ import numpy as np
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader as TorchDataLoader
-from torch_geometric.loader import DataLoader
 
 from config import ExplainerConfig
 from evaluationV2 import evaluate
