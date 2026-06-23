@@ -1,16 +1,31 @@
 import os
 import pickle
+from typing import Dict, List
 
 import numpy as np
 import networkx as nx
-import matplotlib.pyplot as plt
 import torch
 from torch.distributions import Categorical
 
 from utils.dataset_registry import get_dataset_entry
 
+PatternBank = Dict[int, List[nx.Graph]]
 
-def subgraph_mining(config, datasets):
+
+def subgraph_mining(config, datasets) -> PatternBank:
+    """Mine frequent subgraph patterns per class.
+
+    Args:
+        config: ExplainerConfig with dataset and subgraph_method
+        datasets: dict {0: class_0_data, 1: class_1_data}
+
+    Returns:
+        PatternBank: {0: [patterns for class 0], 1: [patterns for class 1]}
+
+    Raises:
+        KeyError: if dataset not in registry
+        ValueError: if subgraph method unknown
+    """
     entry = get_dataset_entry(config.dataset)
     sg_config = entry["subgraph"]
     method = sg_config["method"]
@@ -46,6 +61,9 @@ def subgraph_mining(config, datasets):
         patterns_0.sort(key=sort_key, reverse=True)
         patterns_1.sort(key=sort_key, reverse=True)
         return {0: patterns_0, 1: patterns_1}
+
+    raise ValueError(f"Unknown subgraph_method: {config.subgraph_method}")
+
 
 # # 连续节点特征
 def GraphRepModel(classdata,N):
@@ -211,15 +229,6 @@ def graphsampler(N, Bdist, mean_estimate, result, Adj, threshold=0.97):
     # 这对于后续如果还要将图转回矩阵或输入 GNN 很重要
     # G = nx.convert_node_labels_to_integers(G)
 
-    # --- 绘图 (可选) ---
-    # 使用 spring_layout 布局，seed 固定以保证结果可复现
-    plt.figure(figsize=(6, 6))
-    pos = nx.spring_layout(G, seed=42)
-    nx.draw_networkx(G, pos=pos, node_size=50, node_color='red',
-                     edge_color='gray', with_labels=True, width=1.5)
-    plt.title(f"Generated Graph (Threshold={threshold})")
-    plt.show()
-
     return G
 
 
@@ -356,20 +365,5 @@ def graphsamplerDiscrete(N, X, Adj, threshold=0.1, num_node_features=37):
         largest_cc_nodes = max(nx.connected_components(G), key=len)
         G = G.subgraph(largest_cc_nodes).copy()
         G = nx.convert_node_labels_to_integers(G)
-
-    # 准备绘图标签
-    node_labels = {i: G.nodes[i].get('label_name', '?') for i in G.nodes()}
-
-    # --- 6. 可视化 ---
-    plt.figure(figsize=(8, 8))
-    pos = nx.spring_layout(G, seed=42, k=0.5)
-
-    nx.draw_networkx_nodes(G, pos, node_size=400, node_color='#ADD8E6', edgecolors='black')  # 换个颜色区分
-    nx.draw_networkx_edges(G, pos, edge_color='gray', width=1.5, alpha=0.7)
-    nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=10, font_family='sans-serif')
-
-    plt.title(f"Generated Graph (Threshold={threshold})", fontsize=15)
-    plt.axis('off')
-    plt.show()
 
     return G

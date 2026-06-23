@@ -1,9 +1,9 @@
 import time
+from typing import Optional
 
 import networkx as nx
 import numpy as np
 import torch
-from matplotlib import pyplot as plt
 from networkx.algorithms import isomorphism
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
@@ -14,12 +14,16 @@ from torch_geometric.utils import subgraph as pyg_subgraph
 
 from utils.graph_utils import smarts_to_data
 from utils.subgraph_utils import generate_node_mappings, to_nx
+from utils.subgraph_method import PatternBank
 
 from tqdm import tqdm
 import igraph as ig
 
 class MappedDataset(Dataset):
-    def __init__(self, config, dataset, patterns, pred_labels=None, pred_probs=None, gnn=None):
+    def __init__(self, config, dataset, patterns: PatternBank,
+                 pred_labels: Optional[list] = None,
+                 pred_probs: Optional[list] = None,
+                 gnn=None):
         """
         初始化GraphTrainData数据集
 
