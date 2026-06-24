@@ -6,7 +6,7 @@ from typing import Optional
 from torch_geometric.data import Data
 from torch_geometric.utils import to_networkx
 
-from graph_editor.metadata import infer_feature_mode, infer_node_labels_for_dataset
+from utils.node_labels import infer_feature_mode, infer_node_labels_for_dataset
 
 
 def _labels_for_visualized_graph(x_g, dataset_name=None):
