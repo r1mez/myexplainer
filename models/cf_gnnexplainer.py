@@ -9,7 +9,7 @@ import torch.nn as nn
 from gnns import *
 from torch_geometric.data import InMemoryDataset
 from utils import get_datasets
-from utils.baseline_eval_metrics import OracleWrappedModel
+from eval.baseline_eval_metrics import OracleWrappedModel
 from models.base import BaseExplainer, CFResult
 
 

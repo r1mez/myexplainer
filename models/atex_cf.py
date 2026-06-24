@@ -9,7 +9,7 @@ from torch_geometric.utils import to_dense_adj, to_undirected, sort_edge_index
 from tqdm import tqdm
 
 from utils import get_datasets
-from utils.baseline_eval_metrics import OracleWrappedModel
+from eval.baseline_eval_metrics import OracleWrappedModel
 from gnns import *
 from models.base import BaseExplainer, CFResult
 
