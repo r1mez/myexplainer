@@ -8,7 +8,7 @@ that obtain the desired labels when evaluated by a pre-trained GNN model.
 import torch
 from tqdm import tqdm
 
-from utils.batch_utils import output_to_batch
+from utils.output_to_batch import output_to_batch
 from eval.metrics import proximity as compute_proximity, fidelity as compute_fidelity_prob, sparsity as compute_sparsity
 import torch.nn.functional as F
 

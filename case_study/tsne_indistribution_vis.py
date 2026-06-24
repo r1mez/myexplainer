@@ -45,7 +45,7 @@ from gnns import *
 from models.myexplainerV2 import MyExplainerV2
 from utils.dataset import get_datasets
 from utils.pair_data import MappedDataset, train_collate_fn
-from utils.batch_utils import output_to_batch
+from utils.output_to_batch import output_to_batch
 from utils.subgraph_method import (
     GraphRepModel, graphsampler,
     GraphRepModelDiscrete, graphsamplerDiscrete,
