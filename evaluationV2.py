@@ -64,7 +64,7 @@ def evaluate(config, model, gnn, data_loader):
             )
 
             if getattr(config, 'visualize', False):
-                visualize_explainer_graph(origraphs, y_desired, outputs)
+                visualize_explainer_graph(origraphs, y_desired, outputs, dataset_name=config.dataset)
 
             cf_graphs = output_to_batch(origraphs, outputs)
 
