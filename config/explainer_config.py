@@ -14,15 +14,6 @@ from utils.simple_yaml import load_yaml_file
 # Paths to per-dataset YAML config files (resolved relative to repo root).
 _CONFIGS_DIR = Path(__file__).resolve().parents[1] / "configs"
 _LOSS_HPARAMS_PATH = _CONFIGS_DIR / "loss_hparams.yaml"
-_EXPLAINER_HPARAMS_PATH = _CONFIGS_DIR / "explainer_hparams.yaml"
-
-# Integer-typed explainer hyperparameter keys (all others are cast to float).
-_EXPLAINER_INT_KEYS = frozenset({
-    "oracle_del_topk",
-    "oracle_del_random_negatives",
-    "oracle_del_probe_graphs_per_batch",
-})
-
 
 def _load_dataset_yaml(path: Path, dataset_key: str) -> dict:
     """Load the sub-dict for *dataset_key* from a ``datasets:`` YAML file."""
@@ -97,12 +88,6 @@ class ExplainerConfig:
     cf_margin: float = 0.5
     lambda_cf_margin: float = 1.0
 
-    # --- Explainer hyperparameters (loaded from YAML) ---
-    oracle_del_topk: int = 6
-    oracle_del_random_negatives: int = 2
-    oracle_del_probe_graphs_per_batch: int = 4
-    oracle_del_reward_tie_eps: float = 1e-6
-
     # --- Dynamic fields (set after dataset load) ---
     x_dim: int = 0
     edge_attr_dim: int = 0
@@ -118,12 +103,6 @@ class ExplainerConfig:
 
         # Load per-dataset loss hyperparameters from YAML
         loss_raw = _load_dataset_yaml(_LOSS_HPARAMS_PATH, dataset_key)
-
-        # Load per-dataset explainer hyperparameters from YAML
-        try:
-            explainer_raw = _load_dataset_yaml(_EXPLAINER_HPARAMS_PATH, dataset_key)
-        except (FileNotFoundError, KeyError):
-            explainer_raw = {}
 
         # Build keyword dict from CLI args
         kw = dict(
@@ -150,13 +129,6 @@ class ExplainerConfig:
         for key, value in loss_raw.items():
             if key == "enable_fs_feature_recon":
                 kw[key] = bool(value)
-            else:
-                kw[key] = float(value)
-
-        # Apply explainer YAML values with proper typing
-        for key, value in explainer_raw.items():
-            if key in _EXPLAINER_INT_KEYS:
-                kw[key] = int(value)
             else:
                 kw[key] = float(value)
 
