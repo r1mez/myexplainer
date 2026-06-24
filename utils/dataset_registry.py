@@ -1,83 +1,56 @@
 """Central registry for dataset-specific configuration.
 
-Each dataset has a single entry that captures:
-- Dataset class and folder name
-- GNN checkpoint path
-- Subgraph mining parameters
-- Split strategy
+Loads dataset entries from configs/dataset_registry.yaml and resolves
+class name strings to actual dataset classes from the datasets package.
 """
+
+from pathlib import Path
 
 from datasets import (
     Mutagenicity, MUTAG188, NCI1, AlkaneCarbonyl,
     FluorideCarbonyl, bbbp, BA2Motif, Benzene, PROTEINS,
 )
+from utils.simple_yaml import load_yaml_file
 
-
-DATASET_REGISTRY = {
-    "mutag": {
-        "cls": Mutagenicity,
-        "folder": "mutag",
-        "gnn_file": "mutag_gcn.pt",
-        "subgraph": {"method": "discrete", "N": 417, "num_samples": 100, "threshold": 0.1},
-        "split": "standard",
-    },
-    "mutag188": {
-        "cls": MUTAG188,
-        "folder": "mutag188",
-        "gnn_file": "mutag188_gcn.pt",
-        "subgraph": {"method": "discrete", "N": 111, "num_samples": 100, "threshold": 0.1},
-        "split": "standard",
-    },
-    "nci1": {
-        "cls": NCI1,
-        "folder": "NCI1",
-        "gnn_file": "nci1_gcn.pt",
-        "subgraph": {"method": "discrete", "N": 111, "num_samples": 100, "threshold": 0.1},
-        "split": "standard",
-    },
-    "bbbp": {
-        "cls": bbbp,
-        "folder": "bbbp",
-        "gnn_file": "bbbp_gcn.pt",
-        "subgraph": {"method": "discrete", "N": 111, "num_samples": 100, "threshold": 0.1},
-        "split": "slice",
-    },
-    "ba2motif": {
-        "cls": BA2Motif,
-        "folder": "ba2motif",
-        "gnn_file": "ba2motif_gcn.pt",
-        "subgraph": {"method": "continuous", "N": 25, "num_samples": 50, "threshold": 0.97},
-        "split": "standard",
-    },
-    "benzene": {
-        "cls": Benzene,
-        "folder": "benzene",
-        "gnn_file": "benzene_gcn.pt",
-        "subgraph": {"method": "discrete", "N": 111, "num_samples": 100, "threshold": 0.1},
-        "split": "standard",
-    },
-    "alkane_carbonyl": {
-        "cls": AlkaneCarbonyl,
-        "folder": "alkane_carbonyl",
-        "gnn_file": "alkane_carbonyl_gcn.pt",
-        "subgraph": {"method": "discrete", "N": 111, "num_samples": 100, "threshold": 0.1},
-        "split": "standard",
-    },
-    "fluoride_carbonyl": {
-        "cls": FluorideCarbonyl,
-        "folder": "fluoride_carbonyl",
-        "gnn_file": "fluoride_carbonyl_gcn.pt",
-        "subgraph": {"method": "discrete", "N": 111, "num_samples": 100, "threshold": 0.1},
-        "split": "standard",
-    },
-    "proteins": {
-        "cls": PROTEINS,
-        "folder": "proteins",
-        "gnn_file": "proteins_gcn.pt",
-        "subgraph": {"method": "discrete", "N": 111, "num_samples": 100, "threshold": 0.1},
-        "split": "standard",
-    },
+# Map class name strings (as used in YAML) to actual classes.
+_CLASS_MAP = {
+    "Mutagenicity": Mutagenicity,
+    "MUTAG188": MUTAG188,
+    "NCI1": NCI1,
+    "AlkaneCarbonyl": AlkaneCarbonyl,
+    "FluorideCarbonyl": FluorideCarbonyl,
+    "bbbp": bbbp,
+    "BA2Motif": BA2Motif,
+    "Benzene": Benzene,
+    "PROTEINS": PROTEINS,
 }
+
+_REGISTRY_PATH = Path(__file__).resolve().parents[1] / "configs" / "dataset_registry.yaml"
+
+
+def _load_registry() -> dict:
+    """Load dataset registry from YAML and resolve class references."""
+    raw = load_yaml_file(_REGISTRY_PATH)
+    datasets = raw.get("datasets", {})
+    registry = {}
+    for name, entry in datasets.items():
+        cls_name = entry["cls"]
+        if cls_name not in _CLASS_MAP:
+            raise ValueError(
+                f"Unknown dataset class '{cls_name}' in registry YAML. "
+                f"Available: {', '.join(sorted(_CLASS_MAP))}"
+            )
+        registry[name] = {
+            "cls": _CLASS_MAP[cls_name],
+            "folder": entry["folder"],
+            "gnn_file": entry["gnn_file"],
+            "subgraph": entry["subgraph"],
+            "split": entry["split"],
+        }
+    return registry
+
+
+DATASET_REGISTRY = _load_registry()
 
 
 def get_dataset_entry(name: str) -> dict:
