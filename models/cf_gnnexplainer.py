@@ -1,23 +1,16 @@
 import os
-import numpy as np
-import time
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.nn.parameter import Parameter
-from torch.utils.data import DataLoader
-from torch_geometric.utils import to_dense_adj
+from torch_geometric.utils import to_dense_adj, dense_to_sparse
 from tqdm import tqdm
 import torch.nn as nn
 from gnns import *
 from torch_geometric.data import InMemoryDataset
 from utils import get_datasets
-from utils.baseline_eval_metrics import (
-    compute_proximity_from_edge_index,
-    compute_fidelity_prob_from_probs,
-    compute_sparsity_from_edge_index,
-    OracleWrappedModel,
-)
+from utils.baseline_eval_metrics import OracleWrappedModel
+from models.base import BaseExplainer, CFResult
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -38,7 +31,7 @@ def vector_to_symm_matrix(
 	symm_matrix = torch.triu(matrix) + torch.triu(matrix, -1).t()
 	return F.pad(symm_matrix, (0, n_rows_pad, 0, n_rows_pad))
 
-class CFExplainer(nn.Module):
+class CFExplainer(BaseExplainer):
 	def __init__(self, pred_model: nn.Module, device: str, lr: float) -> None:
 		super().__init__()
 		self.pred_model = pred_model
@@ -179,6 +172,39 @@ class CFExplainer(nn.Module):
 
 		return best_cf_adj
 
+	def explain_graph(self, data, device="cpu"):
+		"""Generate a counterfactual explanation for a single graph.
+
+		Args:
+			data: PyG Data object with x, edge_index.
+			device: Device string for computation.
+
+		Returns:
+			CFResult with cf_edge_index and cf_edge_weight.
+		"""
+		data = data.to(device)
+		x = data.x
+		edge_index = data.edge_index
+		batch = torch.zeros(x.size(0), dtype=torch.long, device=device)
+		adj = to_dense_adj(edge_index, max_num_nodes=x.size(0)).squeeze(0).to(device)
+
+		# Get original prediction as the label target
+		with torch.no_grad():
+			ori_logits = self.pred_model(x, edge_index, batch)
+			if ori_logits.dim() > 1:
+				ori_pred = ori_logits.argmax(dim=1)[0].item()
+			else:
+				ori_pred = ori_logits.argmax().item()
+		label = torch.tensor([ori_pred], device=device)
+
+		best_cf_adj = self.run_one_graph(x, edge_index, batch, adj, label, epochs=100)
+		cf_edge_index, cf_edge_weight = dense_to_sparse(best_cf_adj)
+
+		return CFResult(
+			cf_edge_index=cf_edge_index,
+			cf_edge_weight=cf_edge_weight,
+		)
+
 def run_cf_gnnexplainer(
 	pred_model: nn.Module, pred_labels, epochs: int, device: str, lr: float, dataset: InMemoryDataset
 ):
@@ -220,163 +246,6 @@ def run_cf_gnnexplainer(
 	return cf_feat, cf_adj, cf_edge, graph_idx
 
 
-def evaluate_cf_gnnexplainer(pred_model, dataset, device, lr=0.01, epochs=100):
-	"""
-    评估CF-GNNExplainer
-    修改说明：
-    1. Validity: 仍然计算翻转成功的比例。
-    2. Proximity, Fidelity, Sparsity: 在所有样本上计算平均值（无论是否翻转成功）。
-    """
-	from torch_geometric.data import Batch, Data
-	from torch_geometric.utils import dense_to_sparse
-	import numpy as np
-
-	print("\n" + "=" * 60)
-	print("Evaluating CF-GNNExplainer (Metrics on ALL samples)")
-	print("=" * 60)
-
-	wrapped_model = OracleWrappedModel(pred_model)
-	wrapped_model.eval()
-	explainer = CFExplainer(wrapped_model, device=device, lr=lr)
-
-	# --- 1. 预计算阶段（不计入 runtime 和 oracle_calls） ---
-	y_desired_list = []
-	ori_graphs_list = []
-	ori_prob_list = []
-
-	print("\n1. Computing original predictions...")
-	with torch.no_grad():
-		for data in tqdm(dataset, desc="Pre-computing"):
-			data = data.to(device)
-			ori_pred_logits = pred_model(data.x, data.edge_index, data.batch)
-			ori_prob = F.softmax(ori_pred_logits, dim=1)[0]
-			ori_pred = ori_pred_logits.argmax(dim=1).item()
-
-			y_desired = 1 - ori_pred
-
-			y_desired_list.append(y_desired)
-			ori_graphs_list.append(data)
-			ori_prob_list.append(ori_prob)
-
-	# --- 2. 评估循环 ---
-	valid_cf = 0
-	total_graphs = 0
-
-	proximity_sum = 0.0
-	fidelity_prob_sum = 0.0
-	sparsity_sum = 0.0
-
-	total_cf_time = 0.0
-	total_cf_oracle_calls = 0
-
-	print("\n2. Generating counterfactuals and computing metrics...")
-
-	for idx in tqdm(range(len(dataset)), desc="Evaluating"):
-		total_graphs += 1
-		ori_data = ori_graphs_list[idx]
-		x = ori_data.x
-		edge_index = ori_data.edge_index
-		batch = torch.zeros(x.size(0), dtype=torch.long, device=device)
-
-		y_desired = y_desired_list[idx]
-		ori_prob = ori_prob_list[idx]
-		ori_pred = 1 - y_desired
-
-		ori_adj = to_dense_adj(edge_index, max_num_nodes=x.size(0)).squeeze(0).to(device)
-
-		# 运行 Explainer 生成 CF —— 仅此阶段计入 runtime 和 oracle_calls
-		y_pred_tensor = torch.tensor([ori_pred], device=device)
-		calls_before = wrapped_model.oracle_calls
-		t0 = time.time()
-		cf_adj = explainer.run_one_graph(x, edge_index, batch, ori_adj, y_pred_tensor, epochs)
-		total_cf_time += time.time() - t0
-		total_cf_oracle_calls += wrapped_model.oracle_calls - calls_before
-
-		cf_edge_index, _ = dense_to_sparse(cf_adj)
-		cf_data = Data(
-			x=x.cpu(),
-			edge_index=cf_edge_index.cpu(),
-			num_nodes=x.size(0)
-		)
-
-		# --- 检查 Validity（不计入 oracle_calls） ---
-		with torch.no_grad():
-			cf_data_dev = cf_data.to(device)
-			cf_pred_logits = pred_model(
-				cf_data_dev.x,
-				cf_data_dev.edge_index,
-				torch.zeros(cf_data_dev.x.size(0), dtype=torch.long, device=device)
-			)
-			cf_prob = F.softmax(cf_pred_logits, dim=1)[0]
-			cf_pred = cf_pred_logits.argmax(dim=1).item()
-
-		# 只要预测类变成了目标类，就算 Valid
-		if cf_pred == y_desired:
-			valid_cf += 1
-
-		# ==========================================================
-		# 修改：无论是否 Valid，都计算以下指标
-		# ==========================================================
-
-		# 1. Proximity（与 MyExplainer 定义保持一致）
-		proximity_sum += compute_proximity_from_edge_index(
-			ori_edge_index=edge_index,
-			cf_edge_index=cf_edge_index,
-			num_nodes=x.size(0),
-			device=device,
-		)
-
-		# 2. Fidelity（概率版）
-		fidelity_prob_sum += compute_fidelity_prob_from_probs(
-			ori_probs=ori_prob,
-			cf_probs=cf_prob,
-		)
-
-		# 3. Sparsity
-		sparsity_sum += compute_sparsity_from_edge_index(
-			ori_edge_index=edge_index,
-			cf_edge_index=cf_edge_index,
-		)
-
-	avg_runtime_per_graph = total_cf_time / total_graphs if total_graphs > 0 else 0.0
-	avg_oracle_calls_per_graph = total_cf_oracle_calls / total_graphs if total_graphs > 0 else 0.0
-
-	# --- 3. 结果汇总 ---
-	# Validity: 成功数 / 总数
-	validity = valid_cf / total_graphs if total_graphs > 0 else 0.0
-
-	# 其他指标: 总和 / 总数 (不再是 valid_cf)
-	if total_graphs > 0:
-		avg_proximity = proximity_sum / total_graphs
-		avg_fidelity_prob = fidelity_prob_sum / total_graphs
-		avg_sparsity = sparsity_sum / total_graphs
-	else:
-		avg_proximity = 0.0
-		avg_fidelity_prob = 0.0
-		avg_sparsity = 0.0
-
-	print("\n" + "=" * 60)
-	print("Evaluation Results (Calculated on ALL Samples):")
-	print("=" * 60)
-	print(f"  Validity ↑: {validity:.4f} ({valid_cf}/{total_graphs})")
-	print(f"  Proximity (avg all) ↓: {avg_proximity:.4f}")
-	print(f"  Fidelity (avg all) ↑: {avg_fidelity_prob:.4f}")
-	print(f"  Sparsity (avg all) ↑: {avg_sparsity:.4f}")
-	print(f"  Runtime per graph (s) ↓: {avg_runtime_per_graph:.6f}")
-	print(f"  Oracle calls per graph ↓: {avg_oracle_calls_per_graph:.4f}")
-	print("=" * 60 + "\n")
-
-	return {
-		"validity": validity,
-		"proximity": avg_proximity,
-		"fidelity_prob": avg_fidelity_prob,
-		"sparsity": avg_sparsity,
-		"successful": valid_cf,
-		"total": total_graphs,
-		"runtime": avg_runtime_per_graph,
-		"oracle_calls": avg_oracle_calls_per_graph,
-	}
-
 if __name__ == "__main__":
 	dataset_name = os.environ.get("MYEXPLAINER_DATASET", "fluoride_carbonyl")
 	device = 'cuda:2'
@@ -391,16 +260,11 @@ if __name__ == "__main__":
 	gnn.eval()
 	print("  GNN loaded successfully")
 
-	# 使用新的评估函数
-	print("\n3. Evaluating CF-GNNExplainer on validation set...")
-	metrics = evaluate_cf_gnnexplainer(
-		pred_model=gnn,
-		dataset=test_dataset,
-		device=device,
-		lr=0.01,
-		epochs=100  # 每个图优化100步
-	)
+	wrapped_model = OracleWrappedModel(gnn)
+	explainer = CFExplainer(wrapped_model, device=device, lr=0.01)
 
-	print("\nEvaluation completed!")
-	print(f"Final Metrics: {metrics}")
+	for idx in range(min(10, len(test_dataset))):
+		data = test_dataset[idx]
+		result = explainer.explain_graph(data, device=device)
+		print(f"Graph {idx}: CF edges={result.cf_edge_index.size(1)}")
 

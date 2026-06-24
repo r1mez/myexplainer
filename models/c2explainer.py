@@ -1,92 +1,23 @@
 import os
-import time
 
-import networkx as nx
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from matplotlib import pyplot as plt
 from torch.nn.parameter import Parameter
-from torch_geometric.utils import to_undirected, sort_edge_index, k_hop_subgraph, to_networkx
+from torch_geometric.utils import to_undirected, sort_edge_index
 from tqdm import tqdm
-import math
 
 
-# 假设 utils.py 和 gnns.py 在当前目录下
 from utils import get_datasets
-from utils.baseline_eval_metrics import (
-    compute_proximity_from_edge_index,
-    compute_fidelity_prob_from_probs,
-    compute_sparsity_from_edge_index,
-    OracleWrappedModel,
-)
+from utils.baseline_eval_metrics import OracleWrappedModel
 from gnns import *
+from models.base import BaseExplainer, CFResult
 
 
-def visualize_comparison(data, cf_edge_index, ori_pred, cf_pred, idx, save_dir='results'):
-    """
-    绘制原图与反事实图的对比。
-    - data: 原始 PyG Data 对象
-    - cf_edge_index: 解释器生成的反事实边索引
-    - ori_pred: 原始预测类别
-    - cf_pred: 反事实预测类别
-    - idx: 图片编号
-    """
-    # 1. 转换为 NetworkX 对象
-    # 原始图
-    G_ori = to_networkx(data, to_undirected=True)
-
-    # 反事实图 (注意：需要手动构建，以确保节点数一致)
-    G_cf = nx.Graph()
-    G_cf.add_nodes_from(range(data.num_nodes))  # 确保包含孤立点
-    if cf_edge_index.size(1) > 0:
-        edges = cf_edge_index.t().tolist()
-        G_cf.add_edges_from(edges)
-
-    # 2. 计算固定布局 (以原图为基准，保证两张图节点位置不动)
-    # seed 保证每次运行位置一样，spring_layout 适合一般图结构
-    pos = nx.spring_layout(G_ori, seed=42)
-
-    # 3. 开始绘图
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-
-    # --- 左图：Original ---
-    nx.draw_networkx_nodes(G_ori, pos, ax=axes[0], node_size=50, node_color='#3498db')
-    nx.draw_networkx_edges(G_ori, pos, ax=axes[0], alpha=0.5)
-    axes[0].set_title(f"Original Graph\nPred: {ori_pred}", fontsize=14)
-    axes[0].axis('off')
-
-    # --- 右图：Counterfactual ---
-    # 1. 区分边
-    ori_edges = set(to_networkx(data, to_undirected=True).edges())
-    cf_edges = set(G_cf.edges())
-
-    kept_edges = list(cf_edges.intersection(ori_edges))  # 保留的边
-    added_edges = list(cf_edges - ori_edges)  # 新增的边 (加边)
-    # removed_edges = list(ori_edges - cf_edges)        # 被删的边 (如果想画虚线表示)
-
-    # 2. 分别绘制
-    # 绘制节点
-    nx.draw_networkx_nodes(G_cf, pos, ax=axes[1], node_size=50, node_color='#e74c3c')
-
-    # 绘制保留的边 (黑色/灰色)
-    nx.draw_networkx_edges(G_cf, pos, edgelist=kept_edges, ax=axes[1], alpha=0.5, edge_color='black')
-
-    # 绘制新增的边 (绿色，加粗)
-    if added_edges:
-        nx.draw_networkx_edges(G_cf, pos, edgelist=added_edges, ax=axes[1], alpha=1.0, edge_color='green', width=2)
-
-    axes[1].set_title(f"Counterfactual Graph\nPred: {cf_pred}\n(Green=Added)", fontsize=14)
-    axes[1].axis('off')
-
-    plt.tight_layout()
-
-    # 4. 保存或显示
-    plt.show()
 # ==========================================
 # 1. 核心算法: C2Explainer (仅结构扰动版)
 # ==========================================
-class C2ExplainerStructuralOnly(nn.Module):
+class C2ExplainerStructuralOnly(BaseExplainer):
     def __init__(self, model, epochs=100, lr=0.05, lambda_sim=1.0, max_candidates=1000, **kwargs):
         super().__init__()
         self.model = model
@@ -146,7 +77,7 @@ class C2ExplainerStructuralOnly(nn.Module):
 
         return candidates
 
-    def explain_graph(self, x, edge_index, **kwargs):
+    def _explain_graph_core(self, x, edge_index, **kwargs):
         self.model.eval()
         num_nodes = x.size(0)
         device = self.device
@@ -262,128 +193,30 @@ class C2ExplainerStructuralOnly(nn.Module):
 
         return best_cf_edge_index, x
 
+    def explain_graph(self, data, device="cpu"):
+        """Generate a counterfactual explanation for a single graph.
 
-# ==========================================
-# 2. 评估函数 (保持指标计算逻辑不变)
-# ==========================================
-def evaluate_c2_structural(pred_model, dataset, device, epochs=100, lr=0.05):
-    print("\n" + "=" * 60)
-    print("Evaluating C2Explainer (Structural Only) - ALL Samples Mode")
-    print("=" * 60)
+        Args:
+            data: PyG Data object with x, edge_index.
+            device: Device string for computation.
 
-    wrapped_model = OracleWrappedModel(pred_model)
-    explainer = C2ExplainerStructuralOnly(wrapped_model, epochs=epochs, lr=lr, max_candidates=500)
+        Returns:
+            CFResult with cf_edge_index and cf_edge_weight.
+        """
+        data = data.to(device)
+        x = data.x
+        edge_index = data.edge_index
 
-    valid_cf = 0
-    proximity_sum = 0.0
-    fidelity_prob_sum = 0.0
-    sparsity_sum = 0.0
+        cf_edge_index, cf_x = self._explain_graph_core(x, edge_index)
 
-    # 这里的 total_graphs 指的是有效处理的图数量（排除掉 explainer 报错返回 None 的情况）
-    processed_graphs = 0
-
-    print(f"Processing {len(dataset)} graphs...")
-
-    total_cf_time = 0.0
-    total_cf_oracle_calls = 0
-
-    for idx in tqdm(range(len(dataset))):
-        data = dataset[idx].to(device)
-
-        # 1. 原始预测（不计入 runtime 和 oracle_calls）
-        with torch.no_grad():
-            ori_logits = pred_model(data.x, data.edge_index, data.batch)
-            if ori_logits.dim() > 1: ori_logits = ori_logits[0]
-            ori_probs = F.softmax(ori_logits, dim=-1)
-            ori_pred = ori_logits.argmax().item()
-
-        # 2. 生成解释 —— 仅此阶段计入 runtime 和 oracle_calls
-        batch = torch.zeros(data.x.size(0), dtype=torch.long, device=device)
-        calls_before = wrapped_model.oracle_calls
-        t0 = time.time()
-        cf_edge_index, cf_x = explainer.explain_graph(data.x, data.edge_index, batch=batch)
-        total_cf_time += time.time() - t0
-        total_cf_oracle_calls += wrapped_model.oracle_calls - calls_before
-
-        if cf_edge_index is None:
-            continue
-
-        processed_graphs += 1
-
-        # 3. 验证 CF（不计入 oracle_calls）
-        with torch.no_grad():
-            cf_logits = pred_model(cf_x, cf_edge_index, batch)
-            if cf_logits.dim() > 1: cf_logits = cf_logits[0]
-            cf_probs = F.softmax(cf_logits, dim=-1)
-            cf_pred = cf_logits.argmax().item()
-
-        # --- 这里的逻辑变了 ---
-
-        # A. 计算 Validity (仅作为计数，不影响下面指标的计算)
-        if cf_pred != ori_pred:
-            valid_cf += 1
-
-        # B. 无论是否翻转成功，都计算指标（与 MyExplainer 保持一致）
-        num_nodes = data.x.size(0)
-        proximity_sum += compute_proximity_from_edge_index(
-            ori_edge_index=data.edge_index,
+        return CFResult(
             cf_edge_index=cf_edge_index,
-            num_nodes=num_nodes,
-            device=device,
+            cf_edge_weight=torch.ones(cf_edge_index.size(1), device=device),
         )
-
-        fidelity_prob_sum += compute_fidelity_prob_from_probs(
-            ori_probs=ori_probs,
-            cf_probs=cf_probs,
-        )
-
-        sparsity_sum += compute_sparsity_from_edge_index(
-            ori_edge_index=data.edge_index,
-            cf_edge_index=cf_edge_index,
-        )
-
-        if idx < 10:
-            visualize_comparison(
-                data=data.cpu(),  # 转回 CPU 绘图
-                cf_edge_index=cf_edge_index.cpu(),
-                ori_pred=ori_pred,
-                cf_pred=cf_pred,
-                idx=idx,
-                save_dir='cf_results_vis'  # 图片保存在这个文件夹
-            )
-
-    total_graphs = len(dataset)
-    avg_runtime_per_graph = total_cf_time / total_graphs if total_graphs > 0 else 0.0
-    avg_oracle_calls_per_graph = total_cf_oracle_calls / total_graphs if total_graphs > 0 else 0.0
-
-    # 汇总 (分母改为 processed_graphs)
-    metrics = {
-        "validity": valid_cf / processed_graphs if processed_graphs > 0 else 0,
-        "proximity": proximity_sum / processed_graphs if processed_graphs > 0 else 0,
-        "fidelity_prob": fidelity_prob_sum / processed_graphs if processed_graphs > 0 else 0,
-        "sparsity": sparsity_sum / processed_graphs if processed_graphs > 0 else 0,
-        "successful_count": valid_cf,
-        "total_processed": processed_graphs,
-        "runtime": avg_runtime_per_graph,
-        "oracle_calls": avg_oracle_calls_per_graph,
-    }
-
-    print("\n" + "=" * 60)
-    print("Evaluation Results (Calculated on ALL processed graphs):")
-    print("=" * 60)
-    print(f"  Validity ↑: {metrics['validity']:.4f} ({metrics['successful_count']}/{metrics['total_processed']})")
-    print(f"  Proximity (Adj Diff) ↓: {metrics['proximity']:.4f}")
-    print(f"  Fidelity (Prob Drop) ↑: {metrics['fidelity_prob']:.4f}")
-    print(f"  Sparsity (Structure) ↑: {metrics['sparsity']:.4f}")
-    print(f"  Runtime per graph (s) ↓: {avg_runtime_per_graph:.6f}")
-    print(f"  Oracle calls per graph ↓: {avg_oracle_calls_per_graph:.4f}")
-    print("=" * 60 + "\n")
-
-    return metrics
 
 
 # ==========================================
-# 3. 运行入口
+# 2. 运行入口
 # ==========================================
 if __name__ == "__main__":
     dataset_name = os.environ.get("MYEXPLAINER_DATASET", "fluoride_carbonyl")
@@ -398,14 +231,13 @@ if __name__ == "__main__":
             gnn = torch.load(model_path, map_location=device)
             gnn.eval()
 
-            # 运行评估 (仅结构)
-            evaluate_c2_structural(
-                pred_model=gnn,
-                dataset=test_dataset,
-                device=device,
-                epochs=100,
-                lr=0.05
-            )
+            wrapped_model = OracleWrappedModel(gnn)
+            explainer = C2ExplainerStructuralOnly(wrapped_model, epochs=100, lr=0.05, max_candidates=500)
+
+            for idx in range(min(10, len(test_dataset))):
+                data = test_dataset[idx]
+                result = explainer.explain_graph(data, device=device)
+                print(f"Graph {idx}: CF edges={result.cf_edge_index.size(1)}")
         else:
             print(f"Model path {model_path} not found.")
 

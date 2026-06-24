@@ -1,5 +1,4 @@
 import os
-import time
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import torch
@@ -13,12 +12,7 @@ from tqdm import tqdm
 
 from gnns import *
 from utils import get_datasets
-from utils.baseline_eval_metrics import (
-    OracleWrappedModel,
-    compute_fidelity_prob_from_probs,
-    compute_proximity_from_edge_index,
-    compute_sparsity_from_edge_index,
-)
+from models.base import BaseExplainer, CFResult
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -300,7 +294,7 @@ class RSGGCEClassGAN(nn.Module):
         return self.generator(data.x, data.edge_index)
 
 
-class RSGGCEExplainer(nn.Module):
+class RSGGCEExplainer(BaseExplainer):
     """RSGG-CE baseline with the same external style as existing baselines."""
 
     def __init__(
@@ -336,12 +330,13 @@ class RSGGCEExplainer(nn.Module):
                 for label in range(self.num_classes)
             }
         )
+        self._oracle_model: Optional[nn.Module] = None
 
     def _gan_for_label(self, label: int) -> RSGGCEClassGAN:
         return self.class_gans[str(int(label))]
 
     @torch.no_grad()
-    def explain_graph(
+    def _explain_graph_core(
         self,
         data: Data,
         oracle_model: nn.Module,
@@ -473,6 +468,50 @@ class RSGGCEExplainer(nn.Module):
                     return best_edge_index
 
         return best_edge_index
+
+    def explain_graph(self, data, device="cpu"):
+        """Generate a counterfactual explanation for a single graph.
+
+        Args:
+            data: PyG Data object with x, edge_index.
+            device: Device string for computation.
+
+        Returns:
+            CFResult with cf_edge_index and cf_edge_weight.
+        """
+        cf_edge_index, cf_x = self._explain_graph_core(
+            data=data,
+            oracle_model=self._oracle_model,
+            device=device,
+        )
+
+        return CFResult(
+            cf_edge_index=cf_edge_index,
+            cf_edge_weight=torch.ones(cf_edge_index.size(1), device=_as_device(device)),
+        )
+
+    def fit(self, train_dataset, gnn, device="cpu", epochs=100, lr=1e-3, model_path=None, **kwargs):
+        """Train the RSGG-CE explainer on a dataset.
+
+        Args:
+            train_dataset: Training dataset.
+            gnn: Pre-trained GNN classifier.
+            device: Device string.
+            epochs: Number of training epochs.
+            lr: Learning rate.
+            model_path: Path to save the best model checkpoint.
+        """
+        trained = train_rsgg_ce(
+            pred_model=gnn,
+            train_dataset=train_dataset,
+            epochs=epochs,
+            device=device,
+            lr=lr,
+            model_path=model_path,
+            **kwargs,
+        )
+        self.load_state_dict(trained.state_dict())
+        self._oracle_model = gnn
 
 
 def _partition_dataset_by_prediction(
@@ -616,7 +655,7 @@ def train_rsgg_ce(
 
     This mirrors the baseline style used in models/clear.py: train on the train
     split once, save an explainer checkpoint if requested, and reuse it on any
-    eval split with evaluate_rsgg_ce().
+    eval split via BaseExplainer.explain_graph().
     """
 
     device_obj = _as_device(device)
@@ -717,108 +756,6 @@ def load_rsgg_ce(
     return explainer
 
 
-@torch.no_grad()
-def evaluate_rsgg_ce(
-    pred_model: nn.Module,
-    explainer: RSGGCEExplainer,
-    eval_dataset: Union[InMemoryDataset, Sequence[Data]],
-    device: Union[torch.device, str],
-) -> Dict[str, float]:
-    print("\n" + "=" * 60)
-    print("Evaluating RSGG-CE (GRETEL-style baseline)")
-    print("=" * 60)
-
-    device_obj = _as_device(device)
-    pred_model = pred_model.to(device_obj)
-    pred_model.eval()
-    wrapped_model = OracleWrappedModel(pred_model)
-    wrapped_model.eval()
-    explainer = explainer.to(device_obj)
-    explainer.eval()
-
-    valid_cf = 0
-    proximity_sum = 0.0
-    fidelity_prob_sum = 0.0
-    sparsity_sum = 0.0
-    total_graphs = len(eval_dataset)
-    total_cf_time = 0.0
-    total_cf_oracle_calls = 0
-
-    for idx in tqdm(range(total_graphs), desc="Evaluating"):
-        data = eval_dataset[idx].to(device_obj)
-        ori_probs, ori_logits, ori_pred = _predict_single_graph(
-            pred_model,
-            data.x,
-            data.edge_index,
-            device_obj,
-        )
-        desired_label = _select_desired_label(ori_logits, ori_pred)
-
-        calls_before = wrapped_model.oracle_calls
-        t0 = time.time()
-        cf_edge_index, cf_x = explainer.explain_graph(
-            data=data,
-            oracle_model=wrapped_model,
-            device=device_obj,
-            ori_pred=ori_pred,
-            desired_label=desired_label,
-        )
-        total_cf_time += time.time() - t0
-        total_cf_oracle_calls += wrapped_model.oracle_calls - calls_before
-
-        cf_probs, _, cf_pred = _predict_single_graph(
-            pred_model,
-            cf_x,
-            cf_edge_index,
-            device_obj,
-        )
-
-        if cf_pred == desired_label:
-            valid_cf += 1
-
-        proximity_sum += compute_proximity_from_edge_index(
-            ori_edge_index=data.edge_index,
-            cf_edge_index=cf_edge_index,
-            num_nodes=data.x.size(0),
-            device=device_obj,
-        )
-        fidelity_prob_sum += compute_fidelity_prob_from_probs(
-            ori_probs=ori_probs,
-            cf_probs=cf_probs,
-        )
-        sparsity_sum += compute_sparsity_from_edge_index(
-            ori_edge_index=data.edge_index,
-            cf_edge_index=cf_edge_index,
-        )
-
-    avg_runtime_per_graph = total_cf_time / total_graphs if total_graphs > 0 else 0.0
-    avg_oracle_calls_per_graph = total_cf_oracle_calls / total_graphs if total_graphs > 0 else 0.0
-
-    results = {
-        "validity": valid_cf / total_graphs if total_graphs > 0 else 0.0,
-        "proximity": proximity_sum / total_graphs if total_graphs > 0 else 0.0,
-        "fidelity_prob": fidelity_prob_sum / total_graphs if total_graphs > 0 else 0.0,
-        "sparsity": sparsity_sum / total_graphs if total_graphs > 0 else 0.0,
-        "successful": valid_cf,
-        "total": total_graphs,
-        "runtime": avg_runtime_per_graph,
-        "oracle_calls": avg_oracle_calls_per_graph,
-    }
-
-    print("\n" + "=" * 60)
-    print("Evaluation Results (Calculated on ALL Samples):")
-    print("=" * 60)
-    print(f"  Validity -> {results['validity']:.4f} ({valid_cf}/{total_graphs})")
-    print(f"  Proximity (Adj Diff) -> {results['proximity']:.4f}")
-    print(f"  Fidelity (Prob Drop) -> {results['fidelity_prob']:.4f}")
-    print(f"  Sparsity (Structure) -> {results['sparsity']:.4f}")
-    print(f"  Runtime per graph (s) -> {results['runtime']:.6f}")
-    print(f"  Oracle calls per graph -> {results['oracle_calls']:.4f}")
-    print("=" * 60 + "\n")
-
-    return results
-
-
 if __name__ == "__main__":
     dataset_name = os.environ.get("MYEXPLAINER_DATASET", "alkane_carbonyl")
     epochs = int(os.environ.get("RSGG_CE_EPOCHS", "1000"))
@@ -840,7 +777,7 @@ if __name__ == "__main__":
     pred_model.eval()
     print("GNN classifier loaded.")
 
-    print("Training RSGG-CE explainer from scratch (checkpoint saving disabled).")
+    print("Training RSGG-CE explainer from scratch.")
     explainer = train_rsgg_ce(
         pred_model=pred_model,
         train_dataset=train_dataset,
@@ -850,11 +787,9 @@ if __name__ == "__main__":
         model_path=None,
         sampling_iterations=sampling_iterations,
     )
+    explainer._oracle_model = pred_model
 
-    metrics = evaluate_rsgg_ce(
-        pred_model=pred_model,
-        explainer=explainer,
-        eval_dataset=val_dataset,
-        device=device,
-    )
-    print(f"Final Metrics: {metrics}")
+    for idx in range(min(10, len(val_dataset))):
+        data = val_dataset[idx]
+        result = explainer.explain_graph(data, device=device)
+        print(f"Graph {idx}: CF edges={result.cf_edge_index.size(1)}")

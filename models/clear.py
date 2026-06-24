@@ -2,7 +2,7 @@
 import copy
 import os
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -15,14 +15,9 @@ from torch_geometric.utils import dense_to_sparse, sort_edge_index, to_dense_adj
 from tqdm import tqdm
 
 from utils import get_datasets
-from utils.baseline_eval_metrics import (
-    OracleWrappedModel,
-    compute_fidelity_prob_from_probs,
-    compute_proximity_from_edge_index,
-    compute_sparsity_from_edge_index,
-)
 
 from gnns import *
+from models.base import BaseExplainer, CFResult
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 
@@ -315,7 +310,7 @@ def _search_minimal_cf_edge_index(
     return best_fallback_edge_index, best_fallback_probs, best_fallback_pred
 
 
-class GraphCFE(nn.Module):
+class GraphCFE(BaseExplainer):
     def __init__(
         self,
         pred_model: nn.Module,
@@ -507,6 +502,62 @@ class GraphCFE(nn.Module):
             cf_label=y_desired,
         )
 
+    def explain_graph(self, data, device="cpu"):
+        """Generate a counterfactual explanation for a single graph.
+
+        Args:
+            data: PyG Data object with x, edge_index.
+            device: Device string for computation.
+
+        Returns:
+            CFResult with cf_edge_index and cf_edge_weight.
+        """
+        device_obj = torch.device(device)
+        cf_edge_index, cf_probs, cf_pred = _generate_single_cf(
+            pred_model=self.pred_model,
+            explainer=self,
+            data=data,
+            device=device,
+        )
+
+        if cf_edge_index.numel() > 0:
+            cf_edge_weight = cf_probs[cf_edge_index[0], cf_edge_index[1]] if cf_probs is not None else torch.ones(cf_edge_index.size(1), device=device_obj)
+        else:
+            cf_edge_weight = torch.empty((0,), device=device_obj)
+
+        return CFResult(
+            cf_edge_index=cf_edge_index,
+            cf_edge_weight=cf_edge_weight,
+        )
+
+    def fit(self, train_dataset, gnn, device="cpu", epochs=100, lr=1e-3, model_path=None, max_num_nodes=None):
+        """Train the GraphCFE explainer on a dataset.
+
+        Args:
+            train_dataset: Training dataset.
+            gnn: Pre-trained GNN classifier.
+            device: Device string.
+            epochs: Number of training epochs.
+            lr: Learning rate.
+            model_path: Path to save the best model checkpoint.
+            max_num_nodes: Maximum number of nodes in the dataset.
+        """
+        if max_num_nodes is None:
+            max_num_nodes = max(sample.num_nodes for sample in train_dataset)
+        if model_path is None:
+            model_path = os.path.join(PROJECT_ROOT, "param", "explainers", "graphcfe_temp.pt")
+
+        trained = train_graphcfe(
+            pred_model=gnn,
+            train_dataset=train_dataset,
+            epochs=epochs,
+            device=device,
+            lr=lr,
+            model_path=model_path,
+            max_num_nodes=max_num_nodes,
+        )
+        self.load_state_dict(trained.state_dict())
+
 
 def train_explainer_inner(
     epochs: int,
@@ -688,101 +739,6 @@ def generate_cfs_with_graphcfe(
     return cf_feat_list, cf_adj_list, graph_idx_list
 
 
-@torch.no_grad()
-def evaluate_graphcfe(
-    pred_model: nn.Module,
-    explainer: GraphCFE,
-    eval_dataset: InMemoryDataset,
-    device: str,
-) -> Dict[str, float]:
-    print("\n" + "=" * 60)
-    print("Evaluating GraphCFE (Edge-Mask Structural CF)")
-    print("=" * 60)
-
-    wrapped_model = OracleWrappedModel(pred_model)
-    wrapped_model.eval()
-    explainer.eval()
-    device_obj = torch.device(device)
-
-    valid_cf = 0
-    proximity_sum = 0.0
-    fidelity_prob_sum = 0.0
-    sparsity_sum = 0.0
-    total_graphs = len(eval_dataset)
-
-    total_cf_time = 0.0
-    total_cf_oracle_calls = 0
-
-    for idx in tqdm(range(total_graphs), desc="Evaluating"):
-        data = eval_dataset[idx].to(device_obj)
-
-        ori_prob, ori_logits, ori_pred = _predict_single_graph(
-            pred_model=pred_model,
-            x=data.x,
-            edge_index=data.edge_index,
-            device=device_obj,
-        )
-        _, desired = _select_desired_labels(ori_logits)
-        desired_label = int(desired.item())
-
-        calls_before = wrapped_model.oracle_calls
-        t0 = time.time()
-        cf_edge_index, cf_prob, cf_pred = _generate_single_cf(
-            pred_model=pred_model,
-            explainer=explainer,
-            data=data,
-            device=device,
-            oracle_model=wrapped_model,
-            ori_pred=ori_pred,
-            desired_label=desired_label,
-        )
-        total_cf_time += time.time() - t0
-        total_cf_oracle_calls += wrapped_model.oracle_calls - calls_before
-
-        if cf_pred == desired_label:
-            valid_cf += 1
-
-        proximity_sum += compute_proximity_from_edge_index(
-            ori_edge_index=data.edge_index,
-            cf_edge_index=cf_edge_index,
-            num_nodes=data.x.size(0),
-            device=device_obj,
-        )
-
-        fidelity_prob_sum += compute_fidelity_prob_from_probs(
-            ori_probs=ori_prob,
-            cf_probs=cf_prob,
-        )
-
-        sparsity_sum += compute_sparsity_from_edge_index(
-            ori_edge_index=data.edge_index,
-            cf_edge_index=cf_edge_index,
-        )
-
-    avg_runtime_per_graph = total_cf_time / total_graphs if total_graphs > 0 else 0.0
-    avg_oracle_calls_per_graph = total_cf_oracle_calls / total_graphs if total_graphs > 0 else 0.0
-
-    results = {
-        "validity": valid_cf / total_graphs if total_graphs > 0 else 0.0,
-        "proximity": proximity_sum / total_graphs if total_graphs > 0 else 0.0,
-        "fidelity_prob": fidelity_prob_sum / total_graphs if total_graphs > 0 else 0.0,
-        "sparsity": sparsity_sum / total_graphs if total_graphs > 0 else 0.0,
-        "runtime": avg_runtime_per_graph,
-        "oracle_calls": avg_oracle_calls_per_graph,
-    }
-
-    print(f"Results: {results}")
-    return results
-
-
-def to_dense_adj_sparse_format_helper(adj_binary: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    return dense_to_sparse(adj_binary)
-
-
-def calculate_sparsity(ori_edge_index: torch.Tensor, cf_edge_index: torch.Tensor) -> float:
-    return compute_sparsity_from_edge_index(ori_edge_index, cf_edge_index)
-
-
 if __name__ == "__main__":
     dataset_name = os.environ.get("MYEXPLAINER_DATASET", "fluoride_carbonyl")
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -793,7 +749,6 @@ if __name__ == "__main__":
     )
 
     train_dataset = [data for data in train_dataset if data.num_nodes <= 300]
-    val_dataset = [data for data in val_dataset if data.num_nodes <= 300]
     test_dataset = [data for data in test_dataset if data.num_nodes <= 300]
 
     gnn_path = _resolve_project_path("param", "gnns", f"{dataset_name}_gcn.pt")
@@ -803,16 +758,9 @@ if __name__ == "__main__":
     print("GNN classifier loaded.")
 
     explainer_model_path = _resolve_project_path(
-        "param",
-        "explainers",
-        f"{dataset_name}_graphcfe.pt",
+        "param", "explainers", f"{dataset_name}_graphcfe.pt",
     )
-
-    max_num_nodes = max(
-        sample.num_nodes
-        for dataset in (train_dataset, val_dataset, test_dataset)
-        for sample in dataset
-    )
+    max_num_nodes = max(s.num_nodes for s in train_dataset)
 
     explainer = train_graphcfe(
         pred_model=pred_model,
@@ -824,20 +772,7 @@ if __name__ == "__main__":
         max_num_nodes=max_num_nodes,
     )
 
-    metrics = evaluate_graphcfe(
-        pred_model=pred_model,
-        explainer=explainer,
-        eval_dataset=val_dataset,
-        device=device,
-    )
-
-    print("\n" + "=" * 60)
-    print("Evaluation Results (Calculated on ALL processed graphs):")
-    print("=" * 60)
-    print(f"  Validity ↑: {metrics['validity']:.4f}")
-    print(f"  Proximity (Adj Diff) ↓: {metrics['proximity']:.4f}")
-    print(f"  Fidelity (Prob Drop) ↑: {metrics['fidelity_prob']:.4f}")
-    print(f"  Sparsity (Structure) ↑: {metrics['sparsity']:.4f}")
-    print(f"  Runtime per graph (s) ↓: {metrics['runtime']:.6f}")
-    print(f"  Oracle calls per graph ↓: {metrics['oracle_calls']:.4f}")
-    print("=" * 60 + "\n")
+    for idx in range(min(10, len(test_dataset))):
+        data = test_dataset[idx]
+        result = explainer.explain_graph(data, device=device)
+        print(f"Graph {idx}: CF edges={result.cf_edge_index.size(1)}")

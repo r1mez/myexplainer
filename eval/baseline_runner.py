@@ -1,14 +1,23 @@
 """Shared evaluation harness for baseline counterfactual explainer models."""
 import torch
-from torch_geometric.data import Batch
+import torch.nn.functional as F
+from torch_geometric.data import Batch, Data
 from tqdm import tqdm
+
 from eval.metrics import proximity, fidelity, sparsity
+from models.base import BaseExplainer
 
 
 class BaselineRunner:
     """Run evaluation for any baseline counterfactual explainer.
 
-    Usage:
+    Supports two usage patterns:
+
+    1. BaseExplainer interface (recommended):
+        runner = BaselineRunner(explainer, gnn, config)
+        results = runner.run(data_loader)
+
+    2. Custom forward function:
         runner = BaselineRunner(model, gnn, config)
         results = runner.run(data_loader, model_forward_fn=my_forward)
     """
@@ -18,19 +27,54 @@ class BaselineRunner:
         self.gnn = gnn
         self.config = config
 
+    @staticmethod
+    def _explainer_forward_fn(explainer: BaseExplainer, device: str):
+        """Create a model_forward_fn from a BaseExplainer instance.
+
+        The returned callable takes (model, batch) and returns a list of
+        Data objects representing counterfactual graphs.
+        """
+        def forward_fn(model, batch):
+            if isinstance(batch, Batch):
+                data_list = batch.to_data_list()
+            elif isinstance(batch, Data):
+                data_list = [batch]
+            else:
+                data_list = batch
+
+            cf_list = []
+            for data in data_list:
+                result = explainer.explain_graph(data, device=device)
+                cf_data = Data(
+                    x=data.x.cpu(),
+                    edge_index=result.cf_edge_index.cpu(),
+                    edge_weight=result.cf_edge_weight.cpu(),
+                    num_nodes=data.x.size(0),
+                )
+                cf_list.append(cf_data)
+            return cf_list
+
+        return forward_fn
+
     def run(self, data_loader, model_forward_fn=None):
         """Run evaluation and return metrics dict.
 
         Args:
             data_loader: DataLoader for evaluation data
             model_forward_fn: callable(model, batch) -> cf_graphs
-                             If None, uses model(batch)
+                             If None and self.model is a BaseExplainer,
+                             uses explainer.explain_graph() automatically.
+                             Otherwise uses model(batch).
 
         Returns:
             dict with validity, proximity, fidelity, sparsity
         """
         if model_forward_fn is None:
-            model_forward_fn = lambda m, b: m(b)
+            if isinstance(self.model, BaseExplainer):
+                device = str(self.config.device) if hasattr(self.config, 'device') else "cpu"
+                model_forward_fn = self._explainer_forward_fn(self.model, device)
+            else:
+                model_forward_fn = lambda m, b: m(b)
 
         self.model.eval()
         self.gnn.eval()
