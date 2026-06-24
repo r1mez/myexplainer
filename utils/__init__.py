@@ -15,7 +15,7 @@ except ModuleNotFoundError:
     pass
 
 try:
-    from .train_utils import Gtest, Gtrain
+    from .gnn_train_loop import Gtest, Gtrain
 
     __all__.extend(["Gtest", "Gtrain"])
 except ModuleNotFoundError:
