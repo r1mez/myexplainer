@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.utils import to_dense_adj
 
-from utils.graph_utils import extract_explanatory_subgraph
+from utils.graph_ops import extract_explanatory_subgraph
 
 
 def proximity(config, cf_graphs, ori_graphs):

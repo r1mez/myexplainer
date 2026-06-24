@@ -5,7 +5,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch_geometric.data import Batch
 from torch_geometric.utils import dense_to_sparse, to_dense_adj, to_dense_batch
-from utils.graph_utils import extract_explanatory_subgraph, exclude_explanatory_subgraph
+from utils.graph_ops import extract_explanatory_subgraph, exclude_explanatory_subgraph
 import time
 
 def Gtrain(train_loader, model, optimizer, device, criterion=nn.MSELoss()):

@@ -12,7 +12,7 @@ from torch_geometric.data import Batch
 from torch_geometric.utils import to_networkx, from_networkx
 from torch_geometric.utils import subgraph as pyg_subgraph
 
-from utils.graph_utils import smarts_to_data
+from utils.chemistry import smarts_to_data
 from utils.subgraph_utils import generate_node_mappings, to_nx
 from utils.subgraph_method import PatternBank
 
