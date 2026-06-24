@@ -31,6 +31,7 @@ def subgraph_mining(config, datasets) -> PatternBank:
     method = sg_config["method"]
     N = sg_config["N"]
     num_samples = sg_config["num_samples"]
+    threshold = sg_config.get("threshold", 0.1)
 
     if config.subgraph_method == 'genGraphEx':
         patterns_0 = []
@@ -39,20 +40,20 @@ def subgraph_mining(config, datasets) -> PatternBank:
         if method == "continuous":
             Bdist, mean_estimate, result, Adj = GraphRepModel(datasets[0], N)
             for i in range(num_samples):
-                patterns_0.append(graphsampler(N, Bdist, mean_estimate, result, Adj))
+                patterns_0.append(graphsampler(N, Bdist, mean_estimate, result, Adj, threshold=threshold))
 
             Bdist, mean_estimate, result, Adj = GraphRepModel(datasets[1], N)
             for i in range(num_samples):
-                patterns_1.append(graphsampler(N, Bdist, mean_estimate, result, Adj))
+                patterns_1.append(graphsampler(N, Bdist, mean_estimate, result, Adj, threshold=threshold))
 
         elif method == "discrete":
             X, Adj = GraphRepModelDiscrete(datasets[0], N)
             for i in range(num_samples):
-                patterns_0.append(graphsamplerDiscrete(N, X, Adj))
+                patterns_0.append(graphsamplerDiscrete(N, X, Adj, threshold=threshold))
 
             X, Adj = GraphRepModelDiscrete(datasets[1], N)
             for i in range(num_samples):
-                patterns_1.append(graphsamplerDiscrete(N, X, Adj))
+                patterns_1.append(graphsamplerDiscrete(N, X, Adj, threshold=threshold))
 
         else:
             raise ValueError(f"Unknown subgraph method: {method}")

@@ -52,7 +52,7 @@ def parse_args():
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
 
     # 训练参数
-    parser.add_argument('--epochs', type=int, default=1, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
 
