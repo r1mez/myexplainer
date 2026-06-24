@@ -1,6 +1,47 @@
 import os
+from pathlib import Path
 
-from utils.loss_hparams import LOSS_HPARAM_KEYS, load_loss_hparams
+from utils.simple_yaml import load_yaml_file
+
+_LOSS_HPARAMS_PATH = (
+    Path(__file__).resolve().parents[1] / "configs" / "loss_hparams.yaml"
+)
+
+LOSS_HPARAM_KEYS = (
+    "w_cf",
+    "w_l1_add",
+    "w_l1_del",
+    "w_oracle_del_rank",
+    "w_vgae_recon",
+    "w_vgae_kl",
+    "enable_fs_feature_recon",
+    "w_vgae_feat_recon",
+    "w_proto",
+    "cf_margin",
+    "lambda_cf_margin",
+)
+
+
+def _load_loss_hparams(dataset_name):
+    """Load per-dataset loss hyperparameters from YAML (inlined)."""
+    dataset_key = str(dataset_name).lower()
+    if not _LOSS_HPARAMS_PATH.exists():
+        raise FileNotFoundError(f"Loss config not found: {_LOSS_HPARAMS_PATH}")
+
+    raw = load_yaml_file(_LOSS_HPARAMS_PATH)
+    datasets = raw.get("datasets")
+    if not isinstance(datasets, dict) or dataset_key not in datasets:
+        raise KeyError(f"No loss hyperparameters for dataset '{dataset_key}'.")
+
+    params = datasets[dataset_key]
+    typed = {}
+    for key in LOSS_HPARAM_KEYS:
+        value = params[key]
+        if key == "enable_fs_feature_recon":
+            typed[key] = bool(value)
+        else:
+            typed[key] = float(value)
+    return typed
 
 
 BASE_TRAINING_DEFAULTS = {
@@ -81,7 +122,7 @@ def apply_dataset_tuning(args):
         if getattr(args, key, None) is None:
             setattr(args, key, value)
 
-    params = load_loss_hparams(getattr(args, "dataset"))
+    params = _load_loss_hparams(getattr(args, "dataset"))
     for key, value in params.items():
         setattr(args, key, value)
     return args

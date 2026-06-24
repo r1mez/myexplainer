@@ -161,10 +161,10 @@ def train_explainer(config, model, gnn, train_loader, eval_loader):
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode='min',
-            factor=0.8,
-            patience=15,
+            factor=config.scheduler_factor,
+            patience=config.scheduler_patience,
             verbose=True,
-            min_lr=1e-6
+            min_lr=config.scheduler_min_lr
         )
         print(f"  Optimizer: Adam")
         print(f"  Learning rate: {config.lr}")

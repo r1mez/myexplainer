@@ -5,11 +5,48 @@ Replaces the mutable ``args`` Namespace that was threaded through every module.
 """
 import dataclasses
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 
-from utils.loss_hparams import load_loss_hparams
-from utils.explainer_hparams import load_explainer_hparams
+from utils.simple_yaml import load_yaml_file
+
+# Paths to per-dataset YAML config files (resolved relative to repo root).
+_CONFIGS_DIR = Path(__file__).resolve().parents[1] / "configs"
+_LOSS_HPARAMS_PATH = _CONFIGS_DIR / "loss_hparams.yaml"
+_EXPLAINER_HPARAMS_PATH = _CONFIGS_DIR / "explainer_hparams.yaml"
+
+# Integer-typed explainer hyperparameter keys (all others are cast to float).
+_EXPLAINER_INT_KEYS = frozenset({
+    "oracle_del_topk",
+    "oracle_del_random_negatives",
+    "oracle_del_probe_graphs_per_batch",
+})
+
+
+def _load_dataset_yaml(path: Path, dataset_key: str) -> dict:
+    """Load the sub-dict for *dataset_key* from a ``datasets:`` YAML file."""
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    raw = load_yaml_file(path)
+    datasets = raw.get("datasets")
+    if not isinstance(datasets, dict):
+        raise ValueError(f"Config must contain a top-level 'datasets' mapping: {path}")
+
+    if dataset_key not in datasets:
+        available = ", ".join(sorted(datasets))
+        raise KeyError(
+            f"No configuration for dataset '{dataset_key}' in {path.name}. "
+            f"Available: {available}"
+        )
+
+    params = datasets[dataset_key]
+    if not isinstance(params, dict):
+        raise ValueError(
+            f"Configuration for dataset '{dataset_key}' in {path.name} must be a mapping."
+        )
+    return params
 
 
 @dataclass(frozen=True)
@@ -36,6 +73,10 @@ class ExplainerConfig:
     epochs: int = 1
     lr: float = 0.01
     weight_decay: float = 1e-5
+    grad_clip_max_norm: float = 1.0
+    scheduler_factor: float = 0.8
+    scheduler_patience: int = 15
+    scheduler_min_lr: float = 1e-6
 
     # --- Subgraph parameters ---
     subgraph_method: str = "genGraphEx"
@@ -73,16 +114,18 @@ class ExplainerConfig:
             f"cuda:{args.cuda}" if torch.cuda.is_available() else "cpu"
         )
 
+        dataset_key = str(args.dataset).lower()
+
         # Load per-dataset loss hyperparameters from YAML
-        loss_hparams = load_loss_hparams(args.dataset)
+        loss_raw = _load_dataset_yaml(_LOSS_HPARAMS_PATH, dataset_key)
 
         # Load per-dataset explainer hyperparameters from YAML
         try:
-            explainer_hparams = load_explainer_hparams(args.dataset)
+            explainer_raw = _load_dataset_yaml(_EXPLAINER_HPARAMS_PATH, dataset_key)
         except (FileNotFoundError, KeyError):
-            explainer_hparams = {}
+            explainer_raw = {}
 
-        # Merge: CLI args override YAML defaults
+        # Build keyword dict from CLI args
         kw = dict(
             dataset=args.dataset,
             device=device,
@@ -102,10 +145,20 @@ class ExplainerConfig:
             subgraph_method=args.subgraph_method,
             gnn_path=args.gnn_path,
         )
-        # Apply YAML loss hparams
-        kw.update(loss_hparams)
-        # Apply YAML explainer hparams
-        kw.update(explainer_hparams)
+
+        # Apply loss YAML values with proper typing
+        for key, value in loss_raw.items():
+            if key == "enable_fs_feature_recon":
+                kw[key] = bool(value)
+            else:
+                kw[key] = float(value)
+
+        # Apply explainer YAML values with proper typing
+        for key, value in explainer_raw.items():
+            if key in _EXPLAINER_INT_KEYS:
+                kw[key] = int(value)
+            else:
+                kw[key] = float(value)
 
         return cls(**kw)
 

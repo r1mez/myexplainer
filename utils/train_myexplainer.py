@@ -99,7 +99,7 @@ def train_myexplainerV2(config, model, gnn, train_loader, eval_loader, optimizer
             # print(f"Total gradient norm: {total_norm:.4f}")
 
             # 7. 梯度裁剪（可选，防止梯度爆炸）
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.grad_clip_max_norm)
 
             # 8. 优化器更新参数
             optimizer.step()
