@@ -51,9 +51,12 @@ def parse_args():
     return parser.parse_args()
 
 
-class Benzene_GCN(torch.nn.Module):
+from gnns.base import BaseGNNClassifier
+
+
+class Benzene_GCN(BaseGNNClassifier):
     def __init__(self, conv_unit=3):
-        super(Benzene_GCN, self).__init__()
+        super().__init__(in_channels=14, hidden_dim=128, num_classes=2)
         self.convs = ModuleList()
         self.batch_norms = ModuleList()
         self.relus = ModuleList()
@@ -80,46 +83,19 @@ class Benzene_GCN(torch.nn.Module):
 
         self.softmax = Softmax(dim=1)
 
-    def forward(self, x, edge_index, batch):
-        edge_weight = torch.ones((edge_index.size(1),), device=edge_index.device)
-        for conv, batch_norm, relu in zip(self.convs, self.batch_norms, self.relus):
-            x = conv(x, edge_index, edge_weight)
-            # x = relu(batch_norm(x)) # 可以选择是否开启 BatchNorm
-            x = relu(x)
-        graph_x = global_mean_pool(x, batch)
-        pred = self.ffn(graph_x)
-        self.readout = self.softmax(pred)
-        return pred
-
-    def get_node_reps(self, x, edge_index):
-        edge_weight = torch.ones((edge_index.size(1),), device=edge_index.device)
+    def _forward_convs(self, x, edge_index, edge_weight=None):
+        if edge_weight is None:
+            edge_weight = torch.ones((edge_index.size(1),), device=edge_index.device)
         for conv, batch_norm, relu in zip(self.convs, self.batch_norms, self.relus):
             x = conv(x, edge_index, edge_weight)
             x = relu(x)
-        node_x = x
-        return node_x
+        return x
 
-    def get_graph_rep(self, x, edge_index, batch):
-        node_x = self.get_node_reps(x, edge_index)
-        graph_x = global_mean_pool(node_x, batch)
-        return graph_x
+    def _pool(self, node_emb, batch):
+        return global_mean_pool(node_emb, batch)
 
-    def get_pred(self, x, edge_index, batch):
-        graph_x = self.get_graph_rep(x, edge_index, batch)
-        pred = self.ffn(graph_x)
-        self.readout = self.softmax(pred)
-        return self.readout, pred
-
-    def get_pred_explain(self, x, edge_index, edge_weight, batch):
-        """Explain interface: compute predictions with edge weights in [0,1]."""
-        for conv, batch_norm, relu in zip(self.convs, self.batch_norms, self.relus):
-            x = conv(x, edge_index, edge_weight=edge_weight)
-            x = relu(x)
-        node_x = x
-        graph_x = global_mean_pool(node_x, batch)
-        pred = self.ffn(graph_x)
-        self.readout = self.softmax(pred)
-        return self.readout, pred
+    def _classify(self, graph_emb):
+        return self.ffn(graph_emb)
 
     def reset_parameters(self):
         with torch.no_grad():
