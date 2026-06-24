@@ -69,14 +69,3 @@ def load_explainer_hparams(dataset_name, config_path=None):
         "oracle_del_reward_tie_eps": float(params["oracle_del_reward_tie_eps"]),
     }
     return typed_params
-
-
-def apply_explainer_hparams(args, config_path=None):
-    path = config_path
-    if path is None:
-        path = getattr(args, "explainer_config_path", None)
-
-    params = load_explainer_hparams(getattr(args, "dataset"), path)
-    for key, value in params.items():
-        setattr(args, key, value)
-    return args

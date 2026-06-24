@@ -9,7 +9,6 @@ import torch
 from tqdm import tqdm
 
 from utils.batch_utils import output_to_batch
-from utils.graph_utils import extract_explanatory_subgraph
 from eval.metrics import proximity as compute_proximity, fidelity as compute_fidelity_prob, sparsity as compute_sparsity
 import torch.nn.functional as F
 
@@ -64,23 +63,10 @@ def evaluate(config, model, gnn, data_loader):
                 subgraphs=subgraphs
             )
 
-            visualize_explainer_graph(origraphs, y_desired, outputs)
+            if getattr(config, 'visualize', False):
+                visualize_explainer_graph(origraphs, y_desired, outputs)
 
             cf_graphs = output_to_batch(origraphs, outputs)
-
-            # 🔍 调试：在第一个batch打印统计信息
-            if batch_idx == 0:
-                ori_graphs_list = origraphs.to_data_list()
-                cf_graphs_list = cf_graphs.to_data_list()
-                exp_graphs_list = [extract_explanatory_subgraph(o, c) for o, c in zip(ori_graphs_list, cf_graphs_list)]
-
-                print(f"\n[DEBUG] Batch {batch_idx} - First 3 graphs:")
-                for i in range(min(3, len(ori_graphs_list))):
-                    ori_edges = ori_graphs_list[i].num_edges
-                    cf_edges = cf_graphs_list[i].num_edges
-                    exp_edges = exp_graphs_list[i].num_edges
-                    print(f"  Graph {i}: ori_edges={ori_edges}, cf_edges={cf_edges}, exp_edges={exp_edges}")
-                    print(f"            sparsity = 1 - ({exp_edges}/{ori_edges}) = {1 - exp_edges/ori_edges:.4f}")
 
             valid_cf += count_valid(y_desired, cf_graphs, gnn)
             proximity += compute_proximity(config, cf_graphs, origraphs)

@@ -1,6 +1,6 @@
 import os
 
-from utils.loss_hparams import LOSS_HPARAM_KEYS, apply_loss_hparams
+from utils.loss_hparams import LOSS_HPARAM_KEYS, load_loss_hparams
 
 
 BASE_TRAINING_DEFAULTS = {
@@ -81,7 +81,10 @@ def apply_dataset_tuning(args):
         if getattr(args, key, None) is None:
             setattr(args, key, value)
 
-    return apply_loss_hparams(args)
+    params = load_loss_hparams(getattr(args, "dataset"))
+    for key, value in params.items():
+        setattr(args, key, value)
+    return args
 
 
 def resolve_gnn_checkpoint(dataset_name, gnn_path):

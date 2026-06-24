@@ -186,23 +186,6 @@ class MappedDataset(Dataset):
 
 
 
-def custom_collate_fn(batch):
-    ori_graphs, tgt_graphs, ori_preds, tgt_preds, ori_embs, tgt_embs, distances = zip(*[
-        (item['ori_graph'], item['tgt_graph'], item['ori_pred'], item['tgt_pred'], item['ori_emb'], item['tgt_emb'], item['distance'])
-        for item in batch
-    ])
-
-    return {
-        'ori_graph': Batch.from_data_list(ori_graphs),
-        'tgt_graph': Batch.from_data_list(tgt_graphs),
-        'ori_pred': torch.tensor(ori_preds),
-        'tgt_pred': torch.tensor(tgt_preds),
-        'ori_emb': torch.stack(ori_embs),
-        'tgt_emb': torch.stack(tgt_embs),
-        'distance': torch.tensor(distances)
-    }
-
-
 def train_collate_fn(batch):
     """
     GraphTrainData专用的collate函数

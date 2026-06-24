@@ -81,14 +81,3 @@ def load_loss_hparams(dataset_name, config_path=None):
         else:
             typed_params[key] = float(value)
     return typed_params
-
-
-def apply_loss_hparams(args, config_path=None):
-    path = config_path
-    if path is None:
-        path = getattr(args, "loss_config_path", None)
-
-    params = load_loss_hparams(getattr(args, "dataset"), path)
-    for key, value in params.items():
-        setattr(args, key, value)
-    return args
