@@ -1,14 +1,6 @@
 import os
 
-from datasets import Mutagenicity
-from datasets import MUTAG188
-from datasets import NCI1
-from datasets import AlkaneCarbonyl
-from datasets import FluorideCarbonyl
-from datasets import bbbp
-from datasets import BA2Motif
-from datasets import Benzene
-from datasets import PROTEINS
+from utils.dataset_registry import get_dataset_entry
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -21,60 +13,22 @@ def _resolve_dataset_root(root):
 
 
 def get_datasets(name, root="data/"):
-    """
-    Get preloaded datasets by name
-    :param name: name of the dataset
-    :param root: root path of the dataset
-    :return: train_dataset, test_dataset, val_dataset
-    """
+    """Get preloaded datasets by name."""
     root = _resolve_dataset_root(root)
+    entry = get_dataset_entry(name)
+    folder = os.path.join(root, entry["folder"])
+    cls = entry["cls"]
+
     print("Loading dataset: ", name)
-    if name == "mutag":
-        folder = os.path.join(root, "mutag")
-        train_dataset = Mutagenicity(folder, mode="training")
-        test_dataset = Mutagenicity(folder, mode="testing")
-        val_dataset = Mutagenicity(folder, mode="evaluation")
-    elif name == "mutag188":
-        folder = os.path.join(root, "mutag188")
-        train_dataset = MUTAG188(folder, mode="training")
-        test_dataset = MUTAG188(folder, mode="testing")
-        val_dataset = MUTAG188(folder, mode="evaluation")
-    elif name == "nci1":
-        folder = os.path.join(root, "NCI1")
-        train_dataset = NCI1(folder, mode="training")
-        test_dataset = NCI1(folder, mode="testing")
-        val_dataset = NCI1(folder, mode="evaluation")
-    elif name == "bbbp":
-        folder = os.path.join(root, "bbbp")
-        dataset = bbbp(folder)
+
+    if entry["split"] == "slice":
+        dataset = cls(folder)
         test_dataset = dataset[:200]
         val_dataset = dataset[200:400]
         train_dataset = dataset[400:]
-    elif name == "ba2motif":
-        folder = os.path.join(root, "ba2motif")
-        train_dataset = BA2Motif(folder, mode="training")
-        test_dataset = BA2Motif(folder, mode="testing")
-        val_dataset = BA2Motif(folder, mode="evaluation")
-    elif name == "benzene":
-        folder = os.path.join(root, "benzene")
-        train_dataset = Benzene(folder, mode="training")
-        test_dataset = Benzene(folder, mode="testing")
-        val_dataset = Benzene(folder, mode="evaluation")
-    elif name == "alkane_carbonyl":
-        folder = os.path.join(root, "alkane_carbonyl")
-        train_dataset = AlkaneCarbonyl(folder, mode="training")
-        test_dataset = AlkaneCarbonyl(folder, mode="testing")
-        val_dataset = AlkaneCarbonyl(folder, mode="evaluation")
-    elif name == "fluoride_carbonyl":
-        folder = os.path.join(root, "fluoride_carbonyl")
-        train_dataset = FluorideCarbonyl(folder, mode="training")
-        test_dataset = FluorideCarbonyl(folder, mode="testing")
-        val_dataset = FluorideCarbonyl(folder, mode="evaluation")
-    elif name == "proteins":
-        folder = os.path.join(root, "proteins")
-        train_dataset = PROTEINS(folder, mode="training")
-        test_dataset = PROTEINS(folder, mode="testing")
-        val_dataset = PROTEINS(folder, mode="evaluation")
     else:
-        raise ValueError
+        train_dataset = cls(folder, mode="training")
+        test_dataset = cls(folder, mode="testing")
+        val_dataset = cls(folder, mode="evaluation")
+
     return train_dataset, val_dataset, test_dataset

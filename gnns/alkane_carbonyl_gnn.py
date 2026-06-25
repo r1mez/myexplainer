@@ -95,7 +95,10 @@ def parse_args():
     return parser.parse_args()
 
 
-class AlkaneCarbonylGCN(torch.nn.Module):
+from gnns.base import BaseGNNClassifier
+
+
+class AlkaneCarbonylGCN(BaseGNNClassifier):
     def __init__(
         self,
         in_channels,
@@ -104,7 +107,7 @@ class AlkaneCarbonylGCN(torch.nn.Module):
         dropout=0.3,
         graph_pooling="mean_max",
     ):
-        super(AlkaneCarbonylGCN, self).__init__()
+        super().__init__(in_channels, hidden_dim=hidden_dim, num_classes=2)
         self.convs = ModuleList()
         self.batch_norms = ModuleList()
         self.relus = ModuleList([ReLU() for _ in range(conv_unit)])
@@ -153,7 +156,7 @@ class AlkaneCarbonylGCN(torch.nn.Module):
         )
         self.softmax = Softmax(dim=1)
 
-    def _encode_nodes(self, x, edge_index, edge_weight=None):
+    def _forward_convs(self, x, edge_index, edge_weight=None):
         for layer_idx, (conv, batch_norm, relu) in enumerate(zip(self.convs, self.batch_norms, self.relus)):
             residual = x
             x = conv(x, edge_index, edge_weight)
@@ -162,39 +165,13 @@ class AlkaneCarbonylGCN(torch.nn.Module):
             x = F.dropout(x, p=self.dropout, training=self.training)
             if layer_idx > 0:
                 x = x + residual
-
         return x
 
-    def _pool_graph(self, x, batch):
-        return pool_graph_representation(x, batch, getattr(self, "graph_pooling", "mean_max"))
+    def _pool(self, node_emb, batch):
+        return pool_graph_representation(node_emb, batch, getattr(self, "graph_pooling", "mean_max"))
 
-    def forward(self, x, edge_index, batch):
-        x = self._encode_nodes(x, edge_index)
-        graph_x = self._pool_graph(x, batch)
-        pred = self.ffn(graph_x)
-        self.readout = self.softmax(pred)
-        return pred
-
-    def get_node_reps(self, x, edge_index):
-        return self._encode_nodes(x, edge_index)
-
-    def get_graph_rep(self, x, edge_index, batch):
-        node_x = self.get_node_reps(x, edge_index)
-        graph_x = self._pool_graph(node_x, batch)
-        return graph_x
-
-    def get_pred(self, x, edge_index, batch):
-        graph_x = self.get_graph_rep(x, edge_index, batch)
-        pred = self.ffn(graph_x)
-        self.readout = self.softmax(pred)
-        return self.readout, pred
-
-    def get_pred_explain(self, x, edge_index, edge_mask, batch):
-        x = self._encode_nodes(x, edge_index, edge_weight=edge_mask)
-        graph_x = self._pool_graph(x, batch)
-        pred = self.ffn(graph_x)
-        self.readout = self.softmax(pred)
-        return self.readout, pred
+    def _classify(self, graph_emb):
+        return self.ffn(graph_emb)
 
     def reset_parameters(self):
         with torch.no_grad():

@@ -48,7 +48,10 @@ def parse_args():
     )
     return parser.parse_args()
 
-class PROTEINSGCN(torch.nn.Module):
+from gnns.base import BaseGNNClassifier
+
+
+class PROTEINSGCN(BaseGNNClassifier):
     """
     PROTEINS 图分类模型（GCN）：
       - 优化：引入 gnn.py 核心架构，将 Readout 改为 global_max_pool，精简分类头为单层 Linear。
@@ -62,11 +65,9 @@ class PROTEINSGCN(torch.nn.Module):
         num_classes: int = 2,
         dropout: float = 0.1,
     ):
-        super().__init__()
+        super().__init__(in_channels, hidden_dim, num_classes)
 
         self.num_unit = num_unit
-        self.hidden_dim = hidden_dim
-        self.num_classes = num_classes
         self.dropout = dropout
 
         # ---- GCN 卷积层 (保持不变) ----
@@ -95,7 +96,7 @@ class PROTEINSGCN(torch.nn.Module):
             bn.reset_parameters()
         self.fc.reset_parameters()  # 仅需重置单层 FC
 
-    def get_node_reps(self, x, edge_index, edge_weight=None):
+    def _forward_convs(self, x, edge_index, edge_weight=None):
         if x.dim() == 1:
             x = x.unsqueeze(-1)
         if edge_weight is None:
@@ -108,44 +109,13 @@ class PROTEINSGCN(torch.nn.Module):
             h = bn(h)
             h = self.act(h)
             h = F.dropout(h, p=self.dropout, training=self.training)
-        return h 
+        return h
 
-    def get_graph_rep(self, x, edge_index, batch, edge_weight=None):
-        node_x = self.get_node_reps(x, edge_index, edge_weight=edge_weight)
-        # 优化：对齐 gnn.py 使用 global_max_pool
-        graph_x = global_max_pool(node_x, batch)  
-        return graph_x
+    def _pool(self, node_emb, batch):
+        return global_max_pool(node_emb, batch)
 
-    def classifier(self, graph_x):
-        # 优化：对齐 gnn.py 去除 MLP 结构，直接映射为 logits
-        logits = self.fc(graph_x)  
-        return logits
-
-    # ----------------- 对外接口 (完全保持不变) -----------------
-    def forward(self, x, edge_index, batch):
-        graph_x = self.get_graph_rep(x, edge_index, batch, edge_weight=None)
-        logits = self.classifier(graph_x)
-        return logits
-
-    def get_pred(self, x, edge_index, batch):
-        graph_x = self.get_graph_rep(x, edge_index, batch, edge_weight=None)
-        logits = self.classifier(graph_x)
-        probs  = self.softmax(logits)
-        self.readout = probs
-        return probs, logits
-
-    def get_pred_explain(self, x, edge_index, edge_mask, batch, mask_is_logit=False):
-        # print("edge_mask:", edge_mask)
-        if mask_is_logit:
-            edge_weight = (edge_mask * EPS).sigmoid()
-        else:
-            edge_weight = edge_mask
-
-        graph_x = self.get_graph_rep(x, edge_index, batch, edge_weight=edge_weight)
-        logits  = self.classifier(graph_x)
-        probs   = self.softmax(logits)
-        self.readout = probs
-        return probs, logits
+    def _classify(self, graph_emb):
+        return self.fc(graph_emb)
 
 
 if __name__ == "__main__":

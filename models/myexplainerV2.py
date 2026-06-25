@@ -1,23 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch_scatter
-from torch import Tensor
-from torch.nn import Parameter
-from torch_geometric.nn.dense.linear import Linear
-from torch_geometric.nn.dense import dense_diff_pool
-from torch_geometric.nn import DenseGCNConv, GCNConv, GATConv, global_mean_pool, global_max_pool, global_add_pool
-from torch_geometric.nn.inits import glorot, zeros
-
-# from graph_conv import DenseGATConv
-from torch_geometric.utils import to_dense_adj, to_dense_batch
-
-from typing import Optional
-
-from utils.graph_utils import process_outputs
-
-
-
+from torch_geometric.nn import GCNConv
 
 
 class DeleteNet(nn.Module):
@@ -74,19 +58,19 @@ class AddVGAENet(nn.Module):
 
 
 class MyExplainerV2(nn.Module):
-    def __init__(self, args, gnn):
+    def __init__(self, config, gnn):
         super().__init__()
-        self.args = args
+        self.config = config
         self.gnn = gnn
-        self.device = args.device
+        self.device = config.device
 
         # 1. Graph Encoder
-        self.conv1 = GCNConv(args.x_dim, args.h_dim)
-        self.conv2 = GCNConv(args.h_dim, args.h_dim)
+        self.conv1 = GCNConv(config.x_dim, config.h_dim)
+        self.conv2 = GCNConv(config.h_dim, config.h_dim)
 
         # 2. Functional Modules
-        self.delete_net = DeleteNet(args.h_dim)
-        self.add_net = AddVGAENet(args.h_dim, args.z_dim)
+        self.delete_net = DeleteNet(config.h_dim)
+        self.add_net = AddVGAENet(config.h_dim, config.z_dim)
 
     # ================= 核心逻辑：Pipeline =================
 
@@ -284,7 +268,7 @@ class MyExplainerV2(nn.Module):
 
     # ================= Loss 计算 =================
 
-    def compute_loss(self, args, graphs, y_desired, outputs):
+    def compute_loss(self, graphs, y_desired, outputs):
         # 提取变量，使公式更干净
         cf_probs, cf_logits = self.gnn.get_pred_explain(
             graphs.x, outputs["edge_index_cf"], outputs["edge_weight_cf"], graphs.batch
@@ -292,7 +276,7 @@ class MyExplainerV2(nn.Module):
 
         # 1. CF Prediction Loss (Classification + Margin)
         y_target = y_desired.to(self.device).view(-1).long()
-        cf_loss = self._compute_cf_loss(cf_logits, y_target, args)
+        cf_loss = self._compute_cf_loss(cf_logits, y_target)
 
         # 2. Regularization (L1 Sparsity)
         l1_add = outputs["p_add"].mean() if outputs["p_add"] is not None else 0.0
@@ -302,16 +286,14 @@ class MyExplainerV2(nn.Module):
         recon_loss = outputs["add_recon_loss"]
         kl_loss = outputs["add_kl_loss"]
 
-        # 总损失聚合
+        cfg = self.config
         total_loss = (
-                getattr(args, "w_cf", 5.0) * cf_loss +
-                getattr(args, "w_l1_add", 0.1) * l1_add +
-                getattr(args, "w_l1_del", 1.0) * l1_del +
-                getattr(args, "w_vgae_recon", 5.0) * recon_loss +
-                getattr(args, "w_vgae_kl", 1.0) * kl_loss
+                cfg.w_cf * cf_loss +
+                cfg.w_l1_add * l1_add +
+                cfg.w_l1_del * l1_del +
+                cfg.w_vgae_recon * recon_loss +
+                cfg.w_vgae_kl * kl_loss
         )
-
-        # 4. (Optional) Budget Loss - 如有需要可在此处恢复
 
         return {
             "total": total_loss,
@@ -320,7 +302,7 @@ class MyExplainerV2(nn.Module):
             "kl": kl_loss.detach(),
         }
 
-    def _compute_cf_loss(self, logits, y_target, args):
+    def _compute_cf_loss(self, logits, y_target):
         """计算 CrossEntropy 和 Margin Loss"""
         ce_loss = F.cross_entropy(logits, y_target)
 
@@ -330,76 +312,7 @@ class MyExplainerV2(nn.Module):
         logits_t = logits[idx, y_target]
         logits_o = logits[idx, 1 - y_target]  # 假设是二分类，多分类需修改取最大非target逻辑
 
-        margin = getattr(args, "cf_margin", 0.5)
-        margin_loss = F.relu(margin + logits_o - logits_t).mean()
+        cfg = self.config
+        margin_loss = F.relu(cfg.cf_margin + logits_o - logits_t).mean()
 
-        lambda_margin = getattr(args, "lambda_cf_margin", 1.0)
-        return ce_loss + lambda_margin * margin_loss
-
-
-
-
-
-
-class FrequentSubgraphMiner(nn.Module):
-    def __init__(self, node_emb_dim):
-        super(FrequentSubgraphMiner, self).__init__()
-        self.node_emb_dim = node_emb_dim
-        self.mlp_mask = nn.Sequential(
-            nn.Linear(self.node_emb_dim, self.node_emb_dim * 2),
-            nn.ReLU(),
-            nn.Linear(self.node_emb_dim * 2, 1)
-        )
-
-    def forward(self, x):
-        return self.mlp_mask(x)
-
-
-
-class DenseGATConv(nn.Module):
-    def __init__(self, in_channels, out_channels, edge_attr_dim, aggr='add', bias=True):
-        super(DenseGATConv, self).__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.edge_attr_dim = edge_attr_dim
-        self.aggr = aggr
-        # Linear transformations for node features
-        self.lin_rel = nn.Linear(in_channels, out_channels, bias=bias)
-        self.lin_root = nn.Linear(in_channels, out_channels, bias=False)
-
-        # Additional transformation for edge attributes
-        self.lin_edge = nn.Linear(edge_attr_dim, 1, bias=False)
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        self.lin_rel.reset_parameters()
-        self.lin_root.reset_parameters()
-        self.lin_edge.reset_parameters()
-
-    def forward(self, x, adj, edge_attr, mask=None):
-        B, N, _ = x.size()
-        # Expand edge attributes to match the adjacency matrix
-        full_edge_attr = torch.zeros(B, N, N, self.edge_attr_dim, device=edge_attr.device)
-        tril_indices = torch.tril_indices(N, N, offset=-1)
-        full_edge_attr[:, tril_indices[0], tril_indices[1]] = edge_attr
-        full_edge_attr[:, tril_indices[1], tril_indices[0]] = edge_attr
-        # Transform edge attributes
-        edge_attr_transformed = self.lin_edge(full_edge_attr).squeeze(-1)  # Shape: [B, N, N]
-
-        # Modify adjacency matrix with edge attributes
-        edge_adj = adj * edge_attr_transformed  # Shape: [B, N, N]
-
-        # Perform graph convolution
-        out = torch.matmul(edge_adj, x)  # Shape: [B, N, out_channels]
-        if self.aggr == 'mean':
-            out = out / edge_adj.sum(dim=-1, keepdim=True).clamp_(min=1)
-        out = self.lin_rel(out)
-        out += self.lin_root(x)
-        if mask is not None:
-            out = out * mask.view(B, N, 1).to(x.dtype)
-        return out
-
-    def __repr__(self):
-        return (f'{self.__class__.__name__}({self.in_channels}, '
-                f'{self.out_channels}, edge_attr_dim={self.edge_attr_dim})')
+        return ce_loss + cfg.lambda_cf_margin * margin_loss

@@ -15,15 +15,15 @@ except ModuleNotFoundError:
     pass
 
 try:
-    from .train_utils import Gtest, Gtrain
+    from .gnn_train_loop import Gtest, Gtrain
 
     __all__.extend(["Gtest", "Gtrain"])
 except ModuleNotFoundError:
     pass
 
 try:
-    from .pair_data import custom_collate_fn, train_collate_fn
+    from .pair_data import train_collate_fn
 
-    __all__.extend(["custom_collate_fn", "train_collate_fn"])
+    __all__.append("train_collate_fn")
 except ModuleNotFoundError:
     pass

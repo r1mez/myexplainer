@@ -3,7 +3,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from utils.vis_utils import visualize_explainer_graph
 
-def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, scheduler, epochs=30):
+def train_myexplainerV2(config, model, gnn, train_loader, eval_loader, optimizer, scheduler, epochs=30):
     # 记录损失历史
     losses = {
         'total': [],
@@ -24,7 +24,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
     gnn.eval()
     with torch.no_grad():
         for batch in train_loader:
-            origraphs = batch['graphs'].to(args.device)
+            origraphs = batch['graphs'].to(config.device)
             ori_pred_logits, _ = gnn.get_pred(origraphs.x, origraphs.edge_index, origraphs.batch)
             ori_pred = ori_pred_logits.argmax(dim=1)
             y_desired = (1 - ori_pred).float().unsqueeze(1)
@@ -48,15 +48,15 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
 
         for batch_idx, batch in enumerate(progress_bar):
 
-            origraphs = batch['graphs'].to(args.device)
-            subgraphs = [g.to(args.device) for g in batch['subgraphs']]
+            origraphs = batch['graphs'].to(config.device)
+            subgraphs = [g.to(config.device) for g in batch['subgraphs']]
 
             x = origraphs.x
             edge_index = origraphs.edge_index
             batch_vec = origraphs.batch
 
             # ✅ 使用预计算的y_desired，确保每个epoch一致
-            y_desired = y_desired_cache[batch_idx].to(args.device)
+            y_desired = y_desired_cache[batch_idx].to(config.device)
             y_hat = (1 - y_desired).float()  # 原始预测 = 1 - 反事实标签
 
 
@@ -71,14 +71,12 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
             #     edge_attr=getattr(origraphs, 'edge_attr', None)
             # )
             outputs = model(origraphs, subgraphs)
-            loss_dict = model.compute_loss(args, origraphs, y_desired, outputs)
+            loss_dict = model.compute_loss(origraphs, y_desired, outputs)
 
             if batch_idx in [0,1,2,3,4]:
-                visualize_explainer_graph(origraphs, y_desired, outputs)
+                visualize_explainer_graph(origraphs, y_desired, outputs, dataset_name=config.dataset)
 
 
-
-            # loss_dict = model.compute_loss(args, origraphs, subgraphs, gnn, y_desired, outputs)
 
 
             loss = loss_dict["total"]
@@ -101,7 +99,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
             # print(f"Total gradient norm: {total_norm:.4f}")
 
             # 7. 梯度裁剪（可选，防止梯度爆炸）
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.grad_clip_max_norm)
 
             # 8. 优化器更新参数
             optimizer.step()
@@ -134,8 +132,8 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
 
         with torch.no_grad():  # 不计算梯度
             for batch in eval_loader:
-                origraphs = batch['graphs'].to(args.device)
-                subgraphs = [g.to(args.device) for g in batch['subgraphs']]
+                origraphs = batch['graphs'].to(config.device)
+                subgraphs = [g.to(config.device) for g in batch['subgraphs']]
 
                 # 验证集也需要计算目标标签 (实时计算，因为cache里只有train的)
                 ori_pred_logits, _ = gnn.get_pred(origraphs.x, origraphs.edge_index, origraphs.batch)
@@ -143,7 +141,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
                 y_desired = (1 - ori_pred).float().unsqueeze(1)
 
                 outputs = model(origraphs, subgraphs)
-                loss_dict = model.compute_loss(args, origraphs, y_desired, outputs)
+                loss_dict = model.compute_loss(origraphs, y_desired, outputs)
 
                 val_loss_accum += loss_dict["total"].item()
                 val_batches += 1
@@ -169,13 +167,13 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
         if val_epoch_loss < best_val_loss:
             best_val_loss = val_epoch_loss
             best_epoch = epoch + 1
-            torch.save(model.state_dict(), f'param/myexplainer_{args.dataset}_best.pt')
+            torch.save(model.state_dict(), f'param/myexplainer_{config.dataset}_best.pt')
             print(f"  *** Saved Best Model (Val Loss: {best_val_loss:.4f}) ***")
 
 
         # 定期保存checkpoint
         if (epoch + 1) % 10 == 0:
-            checkpoint_path = f'param/myexplainer_{args.dataset}_epoch_{epoch + 1}.pt'
+            checkpoint_path = f'param/myexplainer_{config.dataset}_epoch_{epoch + 1}.pt'
             torch.save({
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
@@ -186,7 +184,7 @@ def train_myexplainerV2(args, model, gnn, train_loader, eval_loader, optimizer, 
 
 
     # 加载最佳模型
-    model.load_state_dict(torch.load(f'param/myexplainer_{args.dataset}_best.pt'))
+    model.load_state_dict(torch.load(f'param/myexplainer_{config.dataset}_best.pt'))
     print("\nTraining completed! Loaded best model.")
     print(f"Best model from epoch {best_epoch} with loss {best_val_loss:.4f}")
 

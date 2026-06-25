@@ -43,7 +43,10 @@ def parse_args():
     return parser.parse_args()
 
 
-class BA2MotifGCN(torch.nn.Module):
+from gnns.base import BaseGNNClassifier
+
+
+class BA2MotifGCN(BaseGNNClassifier):
     """
     只用基础 GCN 的 BA-2Motif 模型：
 
@@ -60,11 +63,9 @@ class BA2MotifGCN(torch.nn.Module):
         num_classes: int = 2,
         dropout: float = 0.4,
     ):
-        super().__init__()
+        super().__init__(in_channels, hidden_dim, num_classes)
 
         self.num_unit = num_unit
-        self.hidden_dim = hidden_dim
-        self.num_classes = num_classes
         self.dropout = dropout
 
         # ---- GCN 卷积层 ----
@@ -96,76 +97,21 @@ class BA2MotifGCN(torch.nn.Module):
         self.lin1.reset_parameters()
         self.lin2.reset_parameters()
 
-    def get_node_reps(self, x, edge_index, edge_weight=None):
-        """
-        得到节点表示：
-          - x: [N, in_channels]
-          - edge_index: [2, E]
-          - edge_weight: [E]，可为 None / 全 1 / 掩码权重
-        """
+    def _forward_convs(self, x, edge_index, edge_weight=None):
         h = x
-        # 逐层 GCN + BN + ReLU + Dropout
         for conv, bn in zip(self.convs, self.bns):
             h = conv(h, edge_index, edge_weight=edge_weight)
             h = bn(h)
             h = self.act(h)
             h = F.dropout(h, p=self.dropout, training=self.training)
-        return h  # [N, hidden_dim]
+        return h
 
-    def get_graph_rep(self, x, edge_index, batch, edge_weight=None):
-        """
-        图级表示：节点表示做 global_mean_pool。
-        """
-        node_x = self.get_node_reps(x, edge_index, edge_weight=edge_weight)
-        graph_x = global_mean_pool(node_x, batch)  # [B, hidden_dim]
-        return graph_x
+    def _pool(self, node_emb, batch):
+        return global_mean_pool(node_emb, batch)
 
-    def classifier(self, graph_x):
-        """
-        分类头：graph 表示 -> logits
-        """
-        h = self.relu(self.lin1(graph_x))
-        logits = self.lin2(h)  # [B, num_classes]
-        return logits
-
-    # ----------------- 对外接口 -----------------
-    def forward(self, x, edge_index, batch):
-        """
-        标准训练/推理接口：返回 logits（给 CrossEntropyLoss 用）
-        """
-        graph_x = self.get_graph_rep(x, edge_index, batch, edge_weight=None)
-        logits = self.classifier(graph_x)
-        return logits
-
-    def get_pred(self, x, edge_index, batch):
-        """
-        推理用：返回 (softmax 概率, logits)
-        """
-        graph_x = self.get_graph_rep(x, edge_index, batch, edge_weight=None)
-        logits = self.classifier(graph_x)
-        probs  = self.softmax(logits)
-        self.readout = probs
-        return probs, logits
-
-    def get_pred_explain(self, x, edge_index, edge_mask, batch, mask_is_logit=False):
-        """
-        解释用接口：
-          - edge_mask:
-              1) 若为 logits（如 PROXYExplainer 输出），则 mask_is_logit=True，内部走 sigmoid
-              2) 若已在 [0,1]（如 MyExplainerV2 的 adj_recon[row, col]），则 mask_is_logit=False
-
-        返回: (softmax 概率, logits)
-        """
-        if mask_is_logit:
-            edge_weight = (edge_mask * EPS).sigmoid()
-        else:
-            edge_weight = edge_mask
-
-        graph_x = self.get_graph_rep(x, edge_index, batch, edge_weight=edge_weight)
-        logits  = self.classifier(graph_x)
-        probs   = self.softmax(logits)
-        self.readout = probs
-        return probs, logits
+    def _classify(self, graph_emb):
+        h = self.relu(self.lin1(graph_emb))
+        return self.lin2(h)
 
 if __name__ == "__main__":
     set_seed(42)

@@ -51,7 +51,10 @@ def parse_args():
     return parser.parse_args()
 
 
-class Mutag188_GCN(torch.nn.Module):
+from gnns.base import BaseGNNClassifier
+
+
+class Mutag188_GCN(BaseGNNClassifier):
     def __init__(
         self,
         in_channels: int = 7,
@@ -60,11 +63,9 @@ class Mutag188_GCN(torch.nn.Module):
         num_classes: int = 2,
         dropout: float = 0.2,
     ):
-        super().__init__()
+        super().__init__(in_channels, hidden_dim, num_classes)
 
         self.num_unit = num_unit
-        self.hidden_dim = hidden_dim
-        self.num_classes = num_classes
         self.dropout = dropout
 
         self.convs = ModuleList()
@@ -89,7 +90,7 @@ class Mutag188_GCN(torch.nn.Module):
         self.lin1.reset_parameters()
         self.lin2.reset_parameters()
 
-    def get_node_reps(self, x, edge_index, edge_weight=None):
+    def _forward_convs(self, x, edge_index, edge_weight=None):
         h = x
         for conv, bn in zip(self.convs, self.bns):
             h = conv(h, edge_index, edge_weight=edge_weight)
@@ -98,32 +99,12 @@ class Mutag188_GCN(torch.nn.Module):
             h = F.dropout(h, p=self.dropout, training=self.training)
         return h
 
-    def get_graph_rep(self, x, edge_index, batch, edge_weight=None):
-        node_x = self.get_node_reps(x, edge_index, edge_weight=edge_weight)
-        return global_mean_pool(node_x, batch)
+    def _pool(self, node_emb, batch):
+        return global_mean_pool(node_emb, batch)
 
-    def classifier(self, graph_x):
-        h = self.act(self.lin1(graph_x))
+    def _classify(self, graph_emb):
+        h = self.act(self.lin1(graph_emb))
         return self.lin2(h)
-
-    def forward(self, x, edge_index, batch):
-        graph_x = self.get_graph_rep(x, edge_index, batch)
-        return self.classifier(graph_x)
-
-    def get_pred(self, x, edge_index, batch):
-        graph_x = self.get_graph_rep(x, edge_index, batch)
-        logits = self.classifier(graph_x)
-        probs = self.softmax(logits)
-        self.readout = probs
-        return probs, logits
-
-    def get_pred_explain(self, x, edge_index, edge_mask, batch, mask_is_logit=False):
-        edge_weight = (edge_mask * EPS).sigmoid() if mask_is_logit else edge_mask
-        graph_x = self.get_graph_rep(x, edge_index, batch, edge_weight=edge_weight)
-        logits = self.classifier(graph_x)
-        probs = self.softmax(logits)
-        self.readout = probs
-        return probs, logits
 
 
 if __name__ == "__main__":
